@@ -49,21 +49,25 @@
       this.FREEZE_TIME = 14;          // 平滑稳定接触 14 秒后冻结
       this.MISS_LIMIT = 2;            // 掉出 2 个“大方块”后结束
       this.SPAWN_DELAY = 760;         // 一个方块落定后，下一个生成的延迟
-      this.CART_WIDTH_RATIO = 0.60;   // 小车宽度占屏幕比例，略微收窄以扩大横向操作空间
-      this.CART_MIN_WIDTH = 230;
-      this.CART_MAX_WIDTH = 335;
+      this.CART_WIDTH_RATIO = 0.60;   // 小车宽度占屏幕比例
+      this.CART_WIDTH_TRIM = this.CELL; // 小车底部长度比上一版减少一格
+      this.CART_MIN_WIDTH = 202;
+      this.CART_MAX_WIDTH = 305;
       this.CART_WALL_H = 92;
       this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 1320;     // 小车真实最大移动速度，px/s；防止高速拖动造成卡死/穿模
-      this.GRAVITY = 0.78;
+      this.CART_MAX_SPEED = 880;      // 小车真实最大移动速度，px/s；降低高速穿模/挤飞风险
+      this.GRAVITY = 0.68;
       this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
       this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
       this.MIN_CAMERA_SCALE = 0.36;
       this.MAX_CAMERA_SCALE = 0.92;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
-      this.STABLE_SPEED = 1.05;       // 冻结计时的相对速度阈值：更稳才开始计时
-      this.STABLE_ANGULAR = 0.035;    // 16 秒冻结计时的角速度阈值
+      this.STABLE_SPEED = 2.45;       // 冻结计时速度阈值放宽，轻微晃动不再清空计时
+      this.STABLE_ANGULAR = 0.082;    // 冻结计时角速度阈值放宽
+      this.FREEZE_GRACE_TIME = 1.35;  // 平滑接触短暂中断时允许保留计时
+      this.FREEZE_MAX_DRIFT = this.CELL * 1.35; // 接触相对位置漂移超过该值才重置
+      this.spawnCount = 0;            // 已生成的大方块数量，用于前15个不出土方块
 
       this.engine = this.Engine.create({ enableSleeping: true });
       this.world = this.engine.world;
@@ -104,6 +108,7 @@
       this.effects = [];
 
       this.draggingCart = false;
+      this.dragOffsetX = 0;
       this.dropHeld = false;
       this.pointerDown = false;
       this.lastPointer = { x: 0, y: 0 };
@@ -185,7 +190,7 @@
       this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
       this.cartY = this.H - Math.max(178, Math.min(220, this.H * 0.22));
-      this.cartW = this.clamp(this.W * this.CART_WIDTH_RATIO, this.CART_MIN_WIDTH, Math.min(this.CART_MAX_WIDTH, this.W - 70));
+      this.cartW = this.clamp(this.W * this.CART_WIDTH_RATIO - this.CART_WIDTH_TRIM, this.CART_MIN_WIDTH, Math.min(this.CART_MAX_WIDTH, this.W - 80));
       if (!this.cartX) this.cartX = this.W / 2;
       const bounds = this.getCartMoveBounds();
       this.cartX = this.clamp(this.cartX, bounds.minX, bounds.maxX);
@@ -236,7 +241,9 @@
         }
 
         this.draggingCart = true;
-        this.cartTargetX = this.screenToWorldX(p.x);
+        // 按在小车任意部位拖动时，保持手指与小车中心的原始偏移，不再把小车中心瞬移到手指位置。
+        this.dragOffsetX = this.cartX - this.screenToWorldX(p.x);
+        this.cartTargetX = this.screenToWorldX(p.x) + this.dragOffsetX;
       }, { passive: false });
 
       this.canvas.addEventListener('pointermove', (ev) => {
@@ -244,7 +251,7 @@
         const p = getPoint(ev);
         this.lastPointer = p;
         if (this.draggingCart && !this.gameOver) {
-          this.cartTargetX = this.screenToWorldX(p.x);
+          this.cartTargetX = this.screenToWorldX(p.x) + this.dragOffsetX;
         }
       }, { passive: false });
 
@@ -252,6 +259,7 @@
         ev.preventDefault();
         this.pointerDown = false;
         this.draggingCart = false;
+      this.dragOffsetX = 0;
         this.dropHeld = false;
       };
       this.canvas.addEventListener('pointerup', endPointer, { passive: false });
@@ -314,13 +322,13 @@
       if (!floor) return;
       const shelfW = this.CELL * 1.08;
       const shelfH = 12;
-      this.Body.setPosition(floor, { x, y }, true);
-      this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 }, true);
-      this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 }, true);
-      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, true);
-      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, true);
+      this.Body.setPosition(floor, { x, y }, false);
+      this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 }, false);
+      this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 }, false);
+      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, false);
+      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, false);
       this.cartBodies.forEach((b) => {
-        this.Body.setVelocity(b, { x: matterVX, y: 0 });
+        this.Body.setVelocity(b, { x: 0, y: 0 });
         if (this.Sleeping) this.Sleeping.set(b, false);
       });
     }
@@ -361,24 +369,25 @@
 
     spawnPiece() {
       if (this.gameOver) return;
-      const def = this.weightedChoice(this.shapes);
+      const availableShapes = this.spawnCount < 15 ? this.shapes.filter((shape) => shape.kind !== 'dirt') : this.shapes;
+      const def = this.weightedChoice(availableShapes);
       const spawnRange = this.getSpawnRange(def);
       const spawnX = this.random(spawnRange.left, spawnRange.right);
       const spawnY = this.screenToWorldY(82);
       const angle = Math.floor(this.random(0, 4)) * Math.PI / 2;
       const id = 'p' + Math.floor(Math.random() * 1e9).toString(36) + '_' + Date.now().toString(36);
       const parts = [];
-      const cellSize = this.CELL * 0.995;
+      const cellSize = this.CELL * 1.02;
 
       for (let i = 0; i < def.cells.length; i++) {
         const [cx, cy] = def.cells[i];
         const part = this.Bodies.rectangle(spawnX + cx * this.CELL, spawnY + cy * this.CELL, cellSize, cellSize, {
-          chamfer: { radius: 2 },
-          friction: 1.7,
-          frictionStatic: 2.85,
-          frictionAir: 0.048,
+          chamfer: { radius: 1.2 },
+          friction: 2.25,
+          frictionStatic: 4.2,
+          frictionAir: 0.072,
           restitution: 0.0,
-          slop: 0.018,
+          slop: 0.045,
           sleepThreshold: 34,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece_part'
@@ -392,11 +401,11 @@
       } else {
         body = this.Body.create({
           parts,
-          friction: 1.7,
-          frictionStatic: 2.85,
-          frictionAir: 0.048,
+          friction: 2.25,
+          frictionStatic: 4.2,
+          frictionAir: 0.072,
           restitution: 0.0,
-          slop: 0.018,
+          slop: 0.045,
           sleepThreshold: 34,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece'
@@ -445,6 +454,7 @@
       this.pieces.set(body.id, body);
       this.World.add(this.world, body);
       this.activePiece = body;
+      this.spawnCount += 1;
       this.effects.push({ type: 'spawn', x: spawnX, y: spawnY, t: 0, life: 0.45 });
     }
 
@@ -475,6 +485,7 @@
         this.activeFlatKeys.clear();
         this.activeStableKeys.clear();
         this.Engine.update(this.engine, dt * 1000);
+        this.antiPopStabilizer(dt);
         this.updateLockedBodies();
         this.cleanupContactTimers();
         this.updatePieceStates(dt);
@@ -504,19 +515,21 @@
 
       const dx = this.cartX - oldX;
       this.cartVX = dt > 0 ? dx / dt : 0;
-      this.cartMatterVX = dt > 0 ? this.clamp(dx / (dt * 60), -22, 22) : 0;
+      this.cartMatterVX = dt > 0 ? this.clamp(dx / (dt * 60), -8, 8) : 0;
       this.placeCartBodies(this.cartX, this.cartY, this.cartMatterVX);
       if (Math.abs(dx) > 0.01) this.carryLoosePiecesWithCart(dx, dt);
     }
 
     carryLoosePiecesWithCart(dx, dt) {
-      // Matter.js 对“被手动移动的静态车体 + 已休眠方块”的摩擦传递不够稳定。
-      // 这里给车内/车边的未冻结方块补一个温和的随车水平速度，并唤醒休眠体，避免看起来卡在原地。
-      const cartLeft = this.cartX - this.cartW / 2 - this.CELL * 1.2;
-      const cartRight = this.cartX + this.cartW / 2 + this.CELL * 1.2;
-      const zoneTop = this.cartY - this.CART_WALL_H - this.CELL * 2.2;
-      const zoneBottom = this.cartY + this.CELL * 2.2;
-      const targetVX = this.cartMatterVX;
+      // 禁止“弹性”体验的关键改动：小车是手动移动的静态结构，如果仅靠物理引擎处理，
+      // 高速拖动时车体可能瞬间嵌入方块，求解器会用很大的分离冲量把方块挤飞。
+      // 因此这里不再给方块灌入高速水平速度，而是把车内/车边低速方块按小车位移温和搬运，
+      // 并强力削减异常速度，让整体像高摩擦木车上的冰砖，而不是弹簧板。
+      const cartLeft = this.cartX - this.cartW / 2 - this.CELL * 1.45;
+      const cartRight = this.cartX + this.cartW / 2 + this.CELL * 1.45;
+      const zoneTop = this.cartY - this.CART_WALL_H - this.CELL * 3.2;
+      const zoneBottom = this.cartY + this.CELL * 2.3;
+      const absDx = Math.abs(dx);
 
       for (const body of this.pieces.values()) {
         const p = body.plugin && body.plugin.piece;
@@ -531,12 +544,20 @@
         if (!nearCart) continue;
 
         if (this.Sleeping) this.Sleeping.set(body, false);
-        const factor = this.clamp(0.24 + Math.abs(targetVX) / 95, 0.24, 0.50);
+
+        const bottomNearFloor = b.max.y > this.cartY - this.CELL * 2.3 && b.min.y < this.cartY + this.CELL * 1.8;
+        const overCartDeck = b.max.x > this.cartX - this.cartW / 2 - this.CELL * 0.8 && b.min.x < this.cartX + this.cartW / 2 + this.CELL * 0.8;
+        const carryFactor = bottomNearFloor && overCartDeck ? 0.92 : 0.56;
+        this.Body.translate(body, { x: dx * carryFactor, y: 0 });
+
+        // 不给它注入小车高速；只保留很小、被限幅的水平速度，防止“弹射”。
+        const maxLooseVX = 3.2;
+        const nextVX = this.clamp(body.velocity.x * 0.52 + (dx / Math.max(dt, 1 / 120)) / 60 * 0.10, -maxLooseVX, maxLooseVX);
         this.Body.setVelocity(body, {
-          x: body.velocity.x + (targetVX - body.velocity.x) * factor,
-          y: body.velocity.y
+          x: nextVX,
+          y: this.clamp(body.velocity.y * 0.90, -4.6, 5.2)
         });
-        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.86);
+        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * (absDx > 0.5 ? 0.62 : 0.72));
       }
     }
 
@@ -603,10 +624,31 @@
       this.Body.setStatic(body, false);
       if (this.Sleeping) this.Sleeping.set(body, false);
       // 释放时只给极小向下速度；主要让重力自然接手，避免“刚落地就弹起”。
-      const releaseY = Math.min(0.36, Math.max(0.16, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 260));
+      const releaseY = 0.045;
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
+    }
+
+    antiPopStabilizer(dt) {
+      // 全局防弹飞保险：这个游戏当前阶段不需要任何弹性。
+      // 若物理求解器因为高速拖车/轻微嵌入产生异常速度，这里会立刻削掉。
+      for (const body of this.pieces.values()) {
+        const p = body.plugin && body.plugin.piece;
+        if (!p || p.missed || p.inAir || p.cartLocked) continue;
+        const nearCart = body.bounds.max.y > this.cartY - this.CART_WALL_H - this.CELL * 3.5 && body.bounds.min.y < this.cartY + this.CELL * 2.6;
+        const nearX = body.bounds.max.x > this.cartX - this.cartW / 2 - this.CELL * 2 && body.bounds.min.x < this.cartX + this.cartW / 2 + this.CELL * 2;
+        if (!nearCart || !nearX) continue;
+
+        const vxLimit = 6.0;
+        const vyUpLimit = -1.05; // 严禁莫名向上弹起
+        const vyDownLimit = 8.5;
+        let vx = this.clamp(body.velocity.x || 0, -vxLimit, vxLimit);
+        let vy = this.clamp(body.velocity.y || 0, vyUpLimit, vyDownLimit);
+        if ((body.velocity.y || 0) < vyUpLimit) vy = 0;
+        this.Body.setVelocity(body, { x: vx * 0.90, y: vy * 0.92 });
+        this.Body.setAngularVelocity(body, this.clamp((body.angularVelocity || 0) * 0.72, -0.055, 0.055));
+      }
     }
 
     updateLockedBodies() {
@@ -648,11 +690,11 @@
         if (!p.inAir && p.touchedStack && !p.cartLocked) {
           const v = this.Vector.magnitude(body.velocity || { x: 0, y: 0 });
           if (v < 4.8) {
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.925, y: body.velocity.y * 0.965 });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.78);
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.86, y: body.velocity.y * 0.92 });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.64);
           } else {
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.985, y: body.velocity.y * 0.992 });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.88);
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.94, y: body.velocity.y * 0.965 });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.78);
           }
           if (v < 0.16 && Math.abs(body.angularVelocity || 0) < 0.006) {
             this.Body.setVelocity(body, { x: 0, y: 0 });
@@ -755,11 +797,28 @@
           this.tryQuickFreeze(entB.body, entA.body);
         }
 
-        if (stable && this.canNormalFreeze(entA, entB)) {
-          const rec = this.contactTimers.get(key) || { t: 0, a: entA, b: entB };
-          rec.t += this.latestDT;
+        if (flat && this.canNormalFreeze(entA, entB)) {
+          const rec = this.contactTimers.get(key) || {
+            t: 0,
+            a: entA,
+            b: entB,
+            grace: 0,
+            anchor: this.freezeRelativeAnchor(entA, entB)
+          };
           rec.a = entA;
           rec.b = entB;
+          rec.grace = 0;
+          const drift = this.freezeAnchorDrift(rec.anchor, entA, entB);
+          if (drift > this.FREEZE_MAX_DRIFT) {
+            // 接触位置真的滑远了才重置；小幅晃动不清空。
+            rec.t = 0;
+            rec.anchor = this.freezeRelativeAnchor(entA, entB);
+          } else if (stable) {
+            rec.t += this.latestDT;
+          } else {
+            // 仍是平滑面接触但在轻微移动时，保留并少量推进结霜进度。
+            rec.t += this.latestDT * 0.28;
+          }
           this.contactTimers.set(key, rec);
           if (rec.t >= this.FREEZE_TIME) {
             this.freezeByStableContact(entA, entB);
@@ -771,12 +830,34 @@
 
     cleanupContactTimers() {
       for (const [key, rec] of Array.from(this.contactTimers.entries())) {
-        if (!this.activeStableKeys.has(key)) {
-          rec.t -= this.latestDT * 2.2;
-          if (rec.t <= 0) this.contactTimers.delete(key);
+        if (!this.activeFlatKeys.has(key)) {
+          rec.grace = (rec.grace || 0) + this.latestDT;
+          // 平滑接触短暂断开不直接清空；超过容忍时间后才缓慢倒退。
+          if (rec.grace > this.FREEZE_GRACE_TIME) rec.t -= this.latestDT * 0.38;
+          if (rec.t <= 0 || rec.grace > this.FREEZE_GRACE_TIME * 3.2) this.contactTimers.delete(key);
           else this.contactTimers.set(key, rec);
+        } else {
+          rec.grace = 0;
+          this.contactTimers.set(key, rec);
         }
       }
+    }
+
+    freezeRelativeAnchor(entA, entB) {
+      if (entA.type === 'cart' && entB.type === 'piece') {
+        return { x: entB.body.position.x - this.cartX, y: entB.body.position.y - this.cartY };
+      }
+      if (entB.type === 'cart' && entA.type === 'piece') {
+        return { x: entA.body.position.x - this.cartX, y: entA.body.position.y - this.cartY };
+      }
+      return { x: entB.body.position.x - entA.body.position.x, y: entB.body.position.y - entA.body.position.y };
+    }
+
+    freezeAnchorDrift(anchor, entA, entB) {
+      const cur = this.freezeRelativeAnchor(entA, entB);
+      const dx = cur.x - anchor.x;
+      const dy = cur.y - anchor.y;
+      return Math.sqrt(dx * dx + dy * dy);
     }
 
     getEntity(body) {
@@ -981,6 +1062,7 @@
       this.loadedCells = 0;
       this.missedPieces = 0;
       this.gameOver = false;
+      this.spawnCount = 0;
       this.cameraScale = 0.92;
       this.targetCameraScale = 0.92;
       this.cartX = this.W / 2;
