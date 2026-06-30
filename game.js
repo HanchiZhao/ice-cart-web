@@ -56,7 +56,7 @@
       this.CART_WALL_H = 92;
       this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 880;      // 小车真实最大移动速度，px/s；降低高速穿模/挤飞风险
+      this.CART_MAX_SPEED = 650;      // 小车真实最大移动速度，px/s；继续降低高速拖车导致的嵌入/挤飞风险
       this.GRAVITY = 0.68;
       this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
       this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
@@ -67,7 +67,8 @@
       this.STABLE_ANGULAR = 0.082;    // 冻结计时角速度阈值放宽
       this.FREEZE_GRACE_TIME = 1.35;  // 平滑接触短暂中断时允许保留计时
       this.FREEZE_MAX_DRIFT = this.CELL * 1.35; // 接触相对位置漂移超过该值才重置
-      this.spawnCount = 0;            // 已生成的大方块数量，用于前15个不出土方块
+      this.spawnCount = 0;            // 已生成的大方块数量，用于开局特殊生成规则
+      this.firstFiveQuickFreezeSlots = this.makeOpeningQuickFreezeSlots(); // 前5个中固定出现2个急冻
 
       this.engine = this.Engine.create({ enableSleeping: true });
       this.world = this.engine.world;
@@ -168,16 +169,46 @@
           palette: ['#c779a7', '#b55d8c', '#e7a5c7']
         },
         {
-          id: 'QF1', name: '急冻', kind: 'quickFreeze', weight: 2.05,
+          id: 'QF1', name: '急冻', kind: 'quickFreeze', weight: 1.0,
           cells: [[0, 0]],
           palette: ['#7ef4f3', '#17dce0', '#f0ffff']
         },
         {
-          id: 'DIRT_O4', name: '土方块', kind: 'dirt', weight: 0.42,
+          id: 'DIRT_O4', name: '土方块', kind: 'dirt', weight: 1.0,
           cells: [[0, 0], [1, 0], [0, 1], [1, 1]],
           palette: ['#e4bf4d', '#c99a25', '#f6dd7a']
         }
       ];
+    }
+
+    makeOpeningQuickFreezeSlots() {
+      // 开局前 5 个方块中固定有 2 个急冻方块，位置随机但不会重复。
+      const slots = new Set();
+      while (slots.size < 2) slots.add(Math.floor(Math.random() * 5));
+      return slots;
+    }
+
+    getShapeByKind(kind) {
+      return this.shapes.find((shape) => shape.kind === kind) || null;
+    }
+
+    chooseSpawnDefinition() {
+      const normals = this.shapes.filter((shape) => shape.kind === 'ice');
+      const qf = this.getShapeByKind('quickFreeze');
+      const dirt = this.getShapeByKind('dirt');
+
+      // 前 5 个：固定出现 2 个急冻，其余只从普通冰块中随机；不出现土方块。
+      if (this.spawnCount < 5) {
+        if (qf && this.firstFiveQuickFreezeSlots.has(this.spawnCount)) return qf;
+        return this.weightedChoice(normals);
+      }
+
+      // 第 6 个到第 20 个：急冻概率 10%，不出现土方块。
+      // 第 21 个开始：急冻 10%，土方块 10%，其余普通冰块。
+      const r = Math.random();
+      if (qf && r < 0.10) return qf;
+      if (this.spawnCount >= 20 && dirt && r < 0.20) return dirt;
+      return this.weightedChoice(normals);
     }
 
     resize() {
@@ -369,8 +400,7 @@
 
     spawnPiece() {
       if (this.gameOver) return;
-      const availableShapes = this.spawnCount < 15 ? this.shapes.filter((shape) => shape.kind !== 'dirt') : this.shapes;
-      const def = this.weightedChoice(availableShapes);
+      const def = this.chooseSpawnDefinition();
       const spawnRange = this.getSpawnRange(def);
       const spawnX = this.random(spawnRange.left, spawnRange.right);
       const spawnY = this.screenToWorldY(82);
@@ -547,17 +577,29 @@
 
         const bottomNearFloor = b.max.y > this.cartY - this.CELL * 2.3 && b.min.y < this.cartY + this.CELL * 1.8;
         const overCartDeck = b.max.x > this.cartX - this.cartW / 2 - this.CELL * 0.8 && b.min.x < this.cartX + this.cartW / 2 + this.CELL * 0.8;
-        const carryFactor = bottomNearFloor && overCartDeck ? 0.92 : 0.56;
+        const cartSpeed = Math.abs(this.cartVX || 0);
+
+        // 慢速小心移动时，车上方块应该像真实高摩擦接触一样稳定随车走，不应出现可感知滑动/抖动。
+        // 只有快速拖车时才逐渐保留惯性风险。
+        let carryFactor;
+        if (bottomNearFloor && overCartDeck && cartSpeed < 185) carryFactor = 1.0;
+        else if (bottomNearFloor && overCartDeck && cartSpeed < 360) carryFactor = 0.96;
+        else carryFactor = bottomNearFloor && overCartDeck ? 0.82 : 0.48;
         this.Body.translate(body, { x: dx * carryFactor, y: 0 });
 
-        // 不给它注入小车高速；只保留很小、被限幅的水平速度，防止“弹射”。
-        const maxLooseVX = 3.2;
-        const nextVX = this.clamp(body.velocity.x * 0.52 + (dx / Math.max(dt, 1 / 120)) / 60 * 0.10, -maxLooseVX, maxLooseVX);
-        this.Body.setVelocity(body, {
-          x: nextVX,
-          y: this.clamp(body.velocity.y * 0.90, -4.6, 5.2)
-        });
-        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * (absDx > 0.5 ? 0.62 : 0.72));
+        if (bottomNearFloor && overCartDeck && cartSpeed < 185) {
+          this.Body.setVelocity(body, { x: 0, y: this.clamp(body.velocity.y * 0.72, -0.18, 3.2) });
+          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.40);
+        } else {
+          // 不给它注入小车高速；只保留很小、被限幅的水平速度，防止“弹射”。
+          const maxLooseVX = 2.4;
+          const nextVX = this.clamp(body.velocity.x * 0.40 + (dx / Math.max(dt, 1 / 120)) / 60 * 0.055, -maxLooseVX, maxLooseVX);
+          this.Body.setVelocity(body, {
+            x: nextVX,
+            y: this.clamp(body.velocity.y * 0.82, -0.32, 4.8)
+          });
+          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * (absDx > 0.5 ? 0.48 : 0.58));
+        }
       }
     }
 
@@ -568,24 +610,45 @@
       if (!p || !p.inAir || p.missed || p.cartLocked) return;
 
       const speed = this.dropHeld ? this.FAST_AIR_FALL_SPEED : this.AIR_FALL_SPEED;
-      const nextY = body.position.y + speed * dt;
+      const oldY = body.position.y;
+      const nextY = oldY + speed * dt;
       p.airTargetY = nextY;
       p.lastAirSpeed = speed;
       this.Body.setPosition(body, { x: body.position.x, y: nextY });
-      this.Body.setVelocity(body, { x: 0, y: speed / 60 });
+      this.Body.setVelocity(body, { x: 0, y: 0 });
       this.Body.setAngularVelocity(body, 0);
 
-      // Matter.js 不会为两个 static 物体做真实接触解析。
-      // 空中方块为了避免自由落体和自旋，必须保持 static；因此这里手动检测它是否已经碰到小车或堆叠方块。
-      // 一旦接触任意小车建模部位或任意已有方块，立即切换为真实物理刚体。
+      // 空中阶段是静态匀速下落，不能靠 Matter 自由落体。
+      // 一旦检测到接触，不再用上一版“向上回退很多像素”的方式，否则视觉上会像被弹开。
+      // 这里用二分搜索找“刚好还没插入”的临界 y，只保留极小间隙，再释放为物理刚体。
       if (this.kinematicTouchesStack(body)) {
-        // 释放前轻微向上回退，避免匀速下落阶段已经插入小车/方块内部，减少抖动和穿模。
-        for (let i = 0; i < 34 && this.kinematicTouchesStack(body); i++) {
-          this.Body.setPosition(body, { x: body.position.x, y: body.position.y - 1 });
-        }
-        // 不再向下压入接触面，避免释放物理瞬间产生分离弹力。
+        const contactY = this.findKinematicContactY(body, oldY, nextY);
+        this.Body.setPosition(body, { x: body.position.x, y: contactY });
         this.releasePiecePhysics(body);
       }
+    }
+
+    findKinematicContactY(body, oldY, nextY) {
+      // 正常情况下 oldY 未碰撞、nextY 已碰撞；二分后落在接触临界点上方约 0.15px。
+      let lo = oldY;
+      let hi = nextY;
+      this.Body.setPosition(body, { x: body.position.x, y: lo });
+      if (this.kinematicTouchesStack(body)) {
+        // 极少数情况下上一帧已经插入，才向上细调；步长很小，避免肉眼可见的“弹起”。
+        for (let i = 0; i < 16 && this.kinematicTouchesStack(body); i++) {
+          lo -= 0.35;
+          this.Body.setPosition(body, { x: body.position.x, y: lo });
+        }
+        return lo;
+      }
+
+      for (let i = 0; i < 14; i++) {
+        const mid = (lo + hi) / 2;
+        this.Body.setPosition(body, { x: body.position.x, y: mid });
+        if (this.kinematicTouchesStack(body)) hi = mid;
+        else lo = mid;
+      }
+      return lo;
     }
 
     kinematicTouchesStack(body) {
@@ -623,10 +686,11 @@
       p.touchedStack = true;
       this.Body.setStatic(body, false);
       if (this.Sleeping) this.Sleeping.set(body, false);
-      // 释放时只给极小向下速度；主要让重力自然接手，避免“刚落地就弹起”。
-      const releaseY = 0.045;
+      // 释放时不给任何向上/水平速度；只给几乎不可见的向下速度让重力接手，严禁“刚落地弹起”。
+      const releaseY = 0.012;
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
+      p.noPopUntil = this.currentTime + 0.65;
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
     }
 
@@ -640,14 +704,15 @@
         const nearX = body.bounds.max.x > this.cartX - this.cartW / 2 - this.CELL * 2 && body.bounds.min.x < this.cartX + this.cartW / 2 + this.CELL * 2;
         if (!nearCart || !nearX) continue;
 
-        const vxLimit = 6.0;
-        const vyUpLimit = -1.05; // 严禁莫名向上弹起
-        const vyDownLimit = 8.5;
+        const inLandingGrace = p.noPopUntil && this.currentTime < p.noPopUntil;
+        const vxLimit = inLandingGrace ? 1.8 : 4.2;
+        const vyUpLimit = inLandingGrace ? -0.04 : -0.32; // 严禁莫名向上弹起
+        const vyDownLimit = inLandingGrace ? 3.8 : 7.0;
         let vx = this.clamp(body.velocity.x || 0, -vxLimit, vxLimit);
         let vy = this.clamp(body.velocity.y || 0, vyUpLimit, vyDownLimit);
         if ((body.velocity.y || 0) < vyUpLimit) vy = 0;
-        this.Body.setVelocity(body, { x: vx * 0.90, y: vy * 0.92 });
-        this.Body.setAngularVelocity(body, this.clamp((body.angularVelocity || 0) * 0.72, -0.055, 0.055));
+        this.Body.setVelocity(body, { x: vx * (inLandingGrace ? 0.62 : 0.82), y: vy * (inLandingGrace ? 0.78 : 0.88) });
+        this.Body.setAngularVelocity(body, this.clamp((body.angularVelocity || 0) * (inLandingGrace ? 0.38 : 0.58), -0.035, 0.035));
       }
     }
 
@@ -791,10 +856,11 @@
         if (entA.type === 'piece' && (entB.type === 'cart' || entB.type === 'piece')) entA.body.plugin.piece.touchedStack = true;
         if (entB.type === 'piece' && (entA.type === 'cart' || entA.type === 'piece')) entB.body.plugin.piece.touchedStack = true;
 
-        // 急冻方块：只要和其他方块产生平滑接触，目标和自己立即冻结；角搭不触发。
-        if (flat && entA.type === 'piece' && entB.type === 'piece') {
-          this.tryQuickFreeze(entA.body, entB.body);
-          this.tryQuickFreeze(entB.body, entA.body);
+        // 急冻方块：必须是平滑且稳定的接触才触发；如果还在滑/滚，就不触发。
+        // 急冻落到小车上也会在稳定平滑接触时立即冻结并粘到小车。
+        if (flat && stable) {
+          this.tryQuickFreeze(entA, entB);
+          this.tryQuickFreeze(entB, entA);
         }
 
         if (flat && this.canNormalFreeze(entA, entB)) {
@@ -900,7 +966,7 @@
     }
 
     canNormalFreeze(entA, entB) {
-      // 小车被视为开局已冻结的结构：任意小车部位与普通/急冻冰块平滑稳定接触 16 秒后，冰块冻结并粘到小车。
+      // 小车被视为开局已冻结的结构：任意小车部位与普通/急冻冰块平滑稳定接触 14 秒后，冰块冻结并粘到小车。
       if (entA.type === 'cart' && entB.type === 'piece') return entB.body.plugin.piece.kind !== 'dirt';
       if (entB.type === 'cart' && entA.type === 'piece') return entA.body.plugin.piece.kind !== 'dirt';
       if (entA.type === 'piece' && entB.type === 'piece') {
@@ -911,12 +977,25 @@
       return false;
     }
 
-    tryQuickFreeze(source, target) {
-      const sp = source.plugin.piece;
-      const tp = target.plugin.piece;
-      if (!sp || !tp) return;
-      if (sp.kind !== 'quickFreeze') return;
-      if (tp.kind === 'dirt') {
+    tryQuickFreeze(sourceEnt, targetEnt) {
+      if (!sourceEnt || sourceEnt.type !== 'piece') return;
+      const source = sourceEnt.body;
+      const sp = source.plugin && source.plugin.piece;
+      if (!sp || sp.kind !== 'quickFreeze') return;
+
+      if (targetEnt.type === 'cart') {
+        // 急冻方块稳定落到小车任意部位时，立刻与“开局已冻结”的小车结构冻结粘连。
+        if (sp.kind === 'dirt') return;
+        this.setFrozen(source);
+        this.createCartBond(source);
+        this.effects.push({ type: 'quickFreeze', x: source.position.x, y: source.position.y, t: 0, life: 0.55 });
+        return;
+      }
+
+      if (targetEnt.type !== 'piece') return;
+      const target = targetEnt.body;
+      const tp = target.plugin && target.plugin.piece;
+      if (!tp || tp.kind === 'dirt') {
         // 土方块永远不冻结；急冻方块也不会和土块建立固定冻结关系。
         return;
       }
@@ -1063,6 +1142,7 @@
       this.missedPieces = 0;
       this.gameOver = false;
       this.spawnCount = 0;
+      this.firstFiveQuickFreezeSlots = this.makeOpeningQuickFreezeSlots();
       this.cameraScale = 0.92;
       this.targetCameraScale = 0.92;
       this.cartX = this.W / 2;
