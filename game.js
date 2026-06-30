@@ -48,27 +48,28 @@
       this.FREEZE_TIME = 16;          // 平滑稳定接触 16 秒后冻结
       this.MISS_LIMIT = 2;            // 掉出 2 个“大方块”后结束
       this.SPAWN_DELAY = 760;         // 一个方块落定后，下一个生成的延迟
-      this.CART_WIDTH_RATIO = 0.62;   // 小车宽度占屏幕比例
+      this.CART_WIDTH_RATIO = 0.60;   // 小车宽度占屏幕比例，略微收窄以扩大横向操作空间
       this.CART_MIN_WIDTH = 230;
       this.CART_MAX_WIDTH = 335;
       this.CART_WALL_H = 92;
+      this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
       this.CART_FLOOR_H = 16;
       this.CART_MAX_SPEED = 1600;     // 只用于限制极端拖动输入，px/s
       this.GRAVITY = 0.86;
-      this.AIR_FALL_SPEED = 56;       // 空中阶段匀速下降，接近俄罗斯方块慢落手感，px/s
-      this.FAST_AIR_FALL_SPEED = 430; // 按住“下落”时的匀速快落，px/s
+      this.AIR_FALL_SPEED = 62;       // 空中阶段匀速下降，比上一版快约 10%，px/s
+      this.FAST_AIR_FALL_SPEED = 473; // 按住“下落”时的匀速快落，同步快约 10%，px/s
       this.MIN_CAMERA_SCALE = 0.36;
-      this.MAX_CAMERA_SCALE = 1.0;
+      this.MAX_CAMERA_SCALE = 0.92;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
       this.STABLE_SPEED = 1.15;       // 16 秒冻结计时的相对速度阈值
       this.STABLE_ANGULAR = 0.035;    // 16 秒冻结计时的角速度阈值
 
-      this.engine = this.Engine.create({ enableSleeping: false });
+      this.engine = this.Engine.create({ enableSleeping: true });
       this.world = this.engine.world;
       this.engine.gravity.y = this.GRAVITY;
-      this.engine.positionIterations = 8;
-      this.engine.velocityIterations = 8;
-      this.engine.constraintIterations = 4;
+      this.engine.positionIterations = 12;
+      this.engine.velocityIterations = 10;
+      this.engine.constraintIterations = 6;
 
       this.W = 390;
       this.H = 844;
@@ -91,8 +92,8 @@
       this.gameOver = false;
       this.gameStarted = true;
 
-      this.cameraScale = 1;
-      this.targetCameraScale = 1;
+      this.cameraScale = 0.92;
+      this.targetCameraScale = 0.92;
       this.activeFlatKeys = new Set();
       this.activeStableKeys = new Set();
       this.contactTimers = new Map();
@@ -185,8 +186,9 @@
       this.cartY = this.H - Math.max(178, Math.min(220, this.H * 0.22));
       this.cartW = this.clamp(this.W * this.CART_WIDTH_RATIO, this.CART_MIN_WIDTH, Math.min(this.CART_MAX_WIDTH, this.W - 70));
       if (!this.cartX) this.cartX = this.W / 2;
-      this.cartX = this.clamp(this.cartX, this.cartW / 2 + 28, this.W - this.cartW / 2 - 28);
-      this.cartTargetX = this.clamp(this.cartTargetX || this.cartX, this.cartW / 2 + 28, this.W - this.cartW / 2 - 28);
+      const overhang = this.CART_EDGE_OVERHANG || 0;
+      this.cartX = this.clamp(this.cartX, this.cartW / 2 - overhang, this.W - this.cartW / 2 + overhang);
+      this.cartTargetX = this.clamp(this.cartTargetX || this.cartX, this.cartW / 2 - overhang, this.W - this.cartW / 2 + overhang);
       if (this.cartBodies.length) this.placeCartBodies(this.cartX, this.cartY, 0);
     }
 
@@ -248,7 +250,7 @@
     createCart() {
       this.cartBodies.forEach((b) => this.World.remove(this.world, b));
       this.cartBodies = [];
-      // 小车物理模型：底部木板 + 左右挡板 + 两侧挡板顶部的一格小平台。
+      // 小车物理模型：底部木板 + 左右挡板 + 两侧挡板顶部向外延伸的一格小平台，整体像倒过来的帽子。
       // 所有部位都参与碰撞，也都被视为“开局已冻结”的冰块结构。
       const floor = this.Bodies.rectangle(this.cartX, this.cartY, this.cartW, this.CART_FLOOR_H, {
         isStatic: true,
@@ -269,14 +271,14 @@
         label: 'cart_right'
       });
       const shelfW = this.CELL * 1.08;
-      const shelfH = 10;
-      const leftShelf = this.Bodies.rectangle(this.cartX - this.cartW / 2 + 8 + shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
+      const shelfH = 12;
+      const leftShelf = this.Bodies.rectangle(this.cartX - this.cartW / 2 + 8 - shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
         isStatic: true,
         friction: 1.0,
         restitution: 0.02,
         label: 'cart_left_top_platform'
       });
-      const rightShelf = this.Bodies.rectangle(this.cartX + this.cartW / 2 - 8 - shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
+      const rightShelf = this.Bodies.rectangle(this.cartX + this.cartW / 2 - 8 + shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
         isStatic: true,
         friction: 1.0,
         restitution: 0.02,
@@ -295,12 +297,12 @@
       const [floor, left, right, leftShelf, rightShelf] = this.cartBodies;
       if (!floor) return;
       const shelfW = this.CELL * 1.08;
-      const shelfH = 10;
+      const shelfH = 12;
       this.Body.setPosition(floor, { x, y });
       this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 });
       this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 });
-      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
-      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
+      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
+      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
       this.cartBodies.forEach((b) => this.Body.setVelocity(b, { x: matterVX, y: 0 }));
     }
 
@@ -327,11 +329,13 @@
       for (let i = 0; i < def.cells.length; i++) {
         const [cx, cy] = def.cells[i];
         const part = this.Bodies.rectangle(spawnX + cx * this.CELL, spawnY + cy * this.CELL, cellSize, cellSize, {
-          chamfer: { radius: 5 },
-          friction: 0.96,
-          frictionStatic: 1.0,
-          frictionAir: 0.006,
-          restitution: 0.035,
+          chamfer: { radius: 2 },
+          friction: 1.08,
+          frictionStatic: 1.65,
+          frictionAir: 0.022,
+          restitution: 0.0,
+          slop: 0.006,
+          sleepThreshold: 42,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece_part'
         });
@@ -344,10 +348,12 @@
       } else {
         body = this.Body.create({
           parts,
-          friction: 0.96,
-          frictionStatic: 1.0,
-          frictionAir: 0.006,
-          restitution: 0.035,
+          friction: 1.08,
+          frictionStatic: 1.65,
+          frictionAir: 0.022,
+          restitution: 0.0,
+          slop: 0.006,
+          sleepThreshold: 42,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece'
         });
@@ -439,8 +445,9 @@
     }
 
     updateCart(dt) {
-      const minX = this.cartW / 2 + 24;
-      const maxX = this.W - this.cartW / 2 - 24;
+      const overhang = this.CART_EDGE_OVERHANG || 0;
+      const minX = this.cartW / 2 - overhang;
+      const maxX = this.W - this.cartW / 2 + overhang;
       this.cartTargetX = this.clamp(this.cartTargetX, minX, maxX);
       const oldX = this.cartX;
 
@@ -472,6 +479,11 @@
       // 空中方块为了避免自由落体和自旋，必须保持 static；因此这里手动检测它是否已经碰到小车或堆叠方块。
       // 一旦接触任意小车建模部位或任意已有方块，立即切换为真实物理刚体。
       if (this.kinematicTouchesStack(body)) {
+        // 释放前轻微向上回退，避免匀速下落阶段已经插入小车/方块内部，减少抖动和穿模。
+        for (let i = 0; i < 34 && this.kinematicTouchesStack(body); i++) {
+          this.Body.setPosition(body, { x: body.position.x, y: body.position.y - 1 });
+        }
+        this.Body.setPosition(body, { x: body.position.x, y: body.position.y + 0.6 });
         this.releasePiecePhysics(body);
       }
     }
@@ -510,7 +522,7 @@
       p.airTargetY = body.position.y;
       p.touchedStack = true;
       this.Body.setStatic(body, false);
-      const releaseY = Math.max(1.0, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 60);
+      const releaseY = Math.max(0.72, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 78);
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
@@ -545,6 +557,21 @@
         if (belowCart || farSide || droppedTooLow) {
           this.markMissed(body);
           continue;
+        }
+
+        // 进入真实物理后，给低速堆叠体一点“冰砖静摩擦/休眠”阻尼，减少长时间抖动、穿模和卡出小车。
+        if (!p.inAir && p.touchedStack && !p.cartLocked) {
+          const v = this.Vector.magnitude(body.velocity || { x: 0, y: 0 });
+          if (v < 3.4) {
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.965, y: body.velocity.y * 0.985 });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.90);
+          } else {
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.96);
+          }
+          if (v < 0.10 && Math.abs(body.angularVelocity || 0) < 0.003) {
+            this.Body.setVelocity(body, { x: 0, y: 0 });
+            this.Body.setAngularVelocity(body, 0);
+          }
         }
 
         const overlapsCartWidth = body.bounds.max.x > this.cartX - this.cartW / 2 - 12 && body.bounds.min.x < this.cartX + this.cartW / 2 + 12;
@@ -862,8 +889,8 @@
       this.loadedCells = 0;
       this.missedPieces = 0;
       this.gameOver = false;
-      this.cameraScale = 1;
-      this.targetCameraScale = 1;
+      this.cameraScale = 0.92;
+      this.targetCameraScale = 0.92;
       this.cartX = this.W / 2;
       this.cartTargetX = this.cartX;
       this.cartVX = 0;
@@ -1256,18 +1283,18 @@
       ctx.moveTo(this.cartW / 2 - 10, -10);
       ctx.lineTo(this.cartW / 2 - 10, -this.CART_WALL_H - 2);
       ctx.stroke();
-      // 挡板顶部的一格小平台：和物理碰撞箱一致，方块碰到这里也会落下并参与冻结计时。
+      // 挡板顶部的一格外延小平台：和物理碰撞箱一致，整体像倒过来的帽子。
       const shelfW = this.CELL * 1.08;
-      const shelfH = 10;
+      const shelfH = 12;
       ctx.fillStyle = '#56392b';
       ctx.strokeStyle = '#241c19';
       ctx.lineWidth = 4;
-      this.roundRect(ctx, -this.cartW / 2 + 8, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
-      this.roundRect(ctx, this.cartW / 2 - 8 - shelfW, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
+      this.roundRect(ctx, -this.cartW / 2 + 8 - shelfW, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
+      this.roundRect(ctx, this.cartW / 2 - 8, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
       ctx.fillStyle = '#f6ffff';
       ctx.globalAlpha = 0.92;
-      this.roundRect(ctx, -this.cartW / 2 + 8, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
-      this.roundRect(ctx, this.cartW / 2 - 8 - shelfW, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
+      this.roundRect(ctx, -this.cartW / 2 + 8 - shelfW, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
+      this.roundRect(ctx, this.cartW / 2 - 8, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
       ctx.globalAlpha = 1;
 
       ctx.fillStyle = '#72f3ef';
