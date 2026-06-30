@@ -56,7 +56,9 @@
       this.CART_WALL_H = 92;
       this.CART_EDGE_OVERHANG = this.CELL * 1.75; // 允许小车边缘适度移出屏幕，保证更大的接块与摆放范围
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 560;      // 小车真实最大移动速度，px/s；进一步降低，减少慢速/中速拖动时的嵌入和滑动
+      this.CART_MAX_SPEED = 560;      // 小车真实最大移动速度，px/s；保持上限，慢速粘滞阈值另行提高
+      this.CART_SLOW_STICK_SPEED = 390; // 慢速拖车阈值提高：低于该速度时车上堆叠几乎不滑动
+      this.CART_MEDIUM_STICK_SPEED = 520; // 中速拖车仍保留大部分静摩擦
       this.GRAVITY = 0.68;
       this.AIR_FALL_SPEED = 97;       // 空中阶段匀速下降，在上一版基础上再快约 20%，px/s
       this.FAST_AIR_FALL_SPEED = 738; // 按住“下落”时的匀速快落，同步再快约 20%，px/s
@@ -603,8 +605,8 @@
       }
       const zoneTop = Math.max(this.screenToWorldY(-this.CELL * 2), towerTop);
       const cartSpeed = Math.abs(this.cartVX || 0);
-      const slowCareful = cartSpeed < 240;
-      const mediumCareful = cartSpeed < 390;
+      const slowCareful = cartSpeed < this.CART_SLOW_STICK_SPEED;
+      const mediumCareful = cartSpeed < this.CART_MEDIUM_STICK_SPEED;
       const absDx = Math.abs(dx);
 
       for (const body of this.pieces.values()) {
@@ -752,16 +754,26 @@
         if (vy < -0.02) vy = 0;
 
         if (supported) {
-          const vxLimit = inLandingGrace ? 1.25 : 3.2;
-          vx = this.clamp(vx, -vxLimit, vxLimit) * (inLandingGrace ? 0.54 : 0.74);
-          vy = this.clamp(vy, 0, inLandingGrace ? 5.2 : 8.0) * (inLandingGrace ? 0.92 : 0.98);
-          this.Body.setAngularVelocity(body, this.clamp(av * (inLandingGrace ? 0.36 : 0.56), -0.032, 0.032));
+          const wellSeated = this.isWellSeated(body);
+          if (wellSeated) {
+            const vxLimit = inLandingGrace ? 1.25 : 3.2;
+            vx = this.clamp(vx, -vxLimit, vxLimit) * (inLandingGrace ? 0.54 : 0.74);
+            vy = this.clamp(vy, 0, inLandingGrace ? 5.2 : 8.0) * (inLandingGrace ? 0.92 : 0.98);
+            this.Body.setAngularVelocity(body, this.clamp(av * (inLandingGrace ? 0.36 : 0.56), -0.032, 0.032));
+          } else {
+            // 有接触但不是真正坐稳：不要强行“扶正/压住”，否则会出现竖着的闪电一边抽搐一边不倒。
+            // 只禁止向上弹飞，保留自然倾倒，并给一点微弱破平衡力。
+            vx = this.clamp(vx * 0.96, -2.2, 2.2);
+            vy = Math.max(vy, 0.16);
+            this.Body.setAngularVelocity(body, this.clamp(av * 0.96, -0.105, 0.105));
+            this.nudgeUnstablePiece(body);
+          }
         } else {
           // 没有支撑时让重力正常接手，避免悬停；只限制水平漂移和转速。
-          vx = this.clamp(vx * 0.86, -2.0, 2.0);
+          vx = this.clamp(vx * 0.90, -2.1, 2.1);
           // 无支撑时让重力自然、连续地接手；只保证不会悬浮，不强行跳变到很大的下落速度。
-          vy = Math.max(vy, 0.28);
-          this.Body.setAngularVelocity(body, this.clamp(av * 0.86, -0.070, 0.070));
+          vy = Math.max(vy, 0.34);
+          this.Body.setAngularVelocity(body, this.clamp(av * 0.94, -0.095, 0.095));
         }
         this.Body.setVelocity(body, { x: vx, y: vy });
       }
@@ -771,55 +783,128 @@
       return this.hasDownwardSupport(body);
     }
 
-    hasDownwardSupport(body) {
-      // 只把“从下方托住”的接触当成支撑。侧面接触不能算支撑，避免方块侧挂后定在半空。
-      if (!body) return false;
-      const p = body.plugin && body.plugin.piece;
-      if (p && p.cartLocked) return true;
-      const b = body.bounds;
-      const supportTol = this.CELL * 0.30;
-      const minOverlap = this.CELL * 0.34;
-      const candidates = [];
-      for (const cartPart of this.cartBodies) if (cartPart) candidates.push(cartPart);
-      for (const other of this.pieces.values()) {
-        if (!other || other === body) continue;
-        const op = other.plugin && other.plugin.piece;
-        if (!op || op.missed || op.inAir) continue;
-        candidates.push(other);
-      }
-      for (const t of candidates) {
-        const tb = t.bounds;
-        const verticalGap = Math.abs(b.max.y - tb.min.y);
-        if (verticalGap > supportTol) continue;
-        const overlapX = Math.min(b.max.x, tb.max.x) - Math.max(b.min.x, tb.min.x);
-        if (overlapX >= minOverlap) return true;
-      }
-      return false;
+    bodyCollisionParts(body) {
+      if (!body) return [];
+      return body.parts && body.parts.length > 1 ? body.parts.slice(1) : [body];
     }
 
-    hasIndependentSupport(body, excludeBody) {
-      if (!body) return false;
-      const p = body.plugin && body.plugin.piece;
-      if (p && p.cartLocked) return true;
-      const b = body.bounds;
-      const supportTol = this.CELL * 0.30;
-      const minOverlap = this.CELL * 0.34;
+    collectSupportCandidates(body, excludeBody) {
       const candidates = [];
       for (const cartPart of this.cartBodies) if (cartPart) candidates.push(cartPart);
       for (const other of this.pieces.values()) {
         if (!other || other === body || other === excludeBody) continue;
         const op = other.plugin && other.plugin.piece;
         if (!op || op.missed || op.inAir) continue;
-        candidates.push(other);
+        candidates.push(...this.bodyCollisionParts(other));
       }
-      for (const t of candidates) {
-        const tb = t.bounds;
-        const verticalGap = Math.abs(b.max.y - tb.min.y);
-        if (verticalGap > supportTol) continue;
-        const overlapX = Math.min(b.max.x, tb.max.x) - Math.max(b.min.x, tb.min.x);
-        if (overlapX >= minOverlap) return true;
+      return candidates;
+    }
+
+    mergeIntervals(intervals) {
+      if (!intervals.length) return [];
+      intervals.sort((a, b) => a[0] - b[0]);
+      const merged = [intervals[0].slice()];
+      for (let i = 1; i < intervals.length; i++) {
+        const last = merged[merged.length - 1];
+        const cur = intervals[i];
+        if (cur[0] <= last[1] + this.CELL * 0.08) last[1] = Math.max(last[1], cur[1]);
+        else merged.push(cur.slice());
       }
-      return false;
+      return merged;
+    }
+
+    getSupportInfo(body, excludeBody = null) {
+      // 用“每个小格子自己的底边”寻找下面的真实支撑。
+      // 旧版用整块 bounds 的底边，Z/闪电等不规则形状很容易被误判为稳定支撑，导致竖着抽搐。
+      if (!body) return { supported: false, intervals: [], width: 0, count: 0, centerSupported: false, centerX: 0, supportCenter: 0, narrow: true };
+      const p = body.plugin && body.plugin.piece;
+      if (p && p.cartLocked) return { supported: true, intervals: [[body.bounds.min.x, body.bounds.max.x]], width: body.bounds.max.x - body.bounds.min.x, count: 2, centerSupported: true, centerX: body.position.x, supportCenter: body.position.x, narrow: false };
+
+      const supportTol = this.CELL * 0.26;
+      const minOverlap = this.CELL * 0.24;
+      const intervals = [];
+      const parts = this.bodyCollisionParts(body);
+      const candidates = this.collectSupportCandidates(body, excludeBody);
+      for (const part of parts) {
+        const pb = part.bounds;
+        for (const t of candidates) {
+          const tb = t.bounds;
+          const verticalGap = Math.abs(pb.max.y - tb.min.y);
+          if (verticalGap > supportTol) continue;
+          const overlapX = Math.min(pb.max.x, tb.max.x) - Math.max(pb.min.x, tb.min.x);
+          if (overlapX >= minOverlap) {
+            intervals.push([Math.max(pb.min.x, tb.min.x), Math.min(pb.max.x, tb.max.x)]);
+          }
+        }
+      }
+      const merged = this.mergeIntervals(intervals);
+      let width = 0;
+      for (const it of merged) width += Math.max(0, it[1] - it[0]);
+      const centerX = body.position.x;
+      const min = merged.length ? Math.min(...merged.map((it) => it[0])) : 0;
+      const max = merged.length ? Math.max(...merged.map((it) => it[1])) : 0;
+      const supportCenter = merged.length ? (min + max) / 2 : centerX;
+      const centerSupported = merged.some((it) => centerX >= it[0] - this.CELL * 0.12 && centerX <= it[1] + this.CELL * 0.12);
+      return {
+        supported: merged.length > 0,
+        intervals: merged,
+        width,
+        count: merged.length,
+        centerSupported,
+        centerX,
+        supportCenter,
+        narrow: width < this.CELL * 0.72,
+        min,
+        max
+      };
+    }
+
+    hasDownwardSupport(body) {
+      // 只把“从下方托住”的接触当成支撑。侧面接触不能算支撑，避免方块侧挂后定在半空。
+      return this.getSupportInfo(body).supported;
+    }
+
+    hasIndependentSupport(body, excludeBody) {
+      return this.getSupportInfo(body, excludeBody).supported;
+    }
+
+    angleDistanceToRightAngle(angle) {
+      const q = Math.PI / 2;
+      let a = Math.abs(((angle % q) + q) % q);
+      return Math.min(a, q - a);
+    }
+
+    isWellSeated(body, excludeBody = null) {
+      const p = body && body.plugin && body.plugin.piece;
+      if (!body) return false;
+      if (p && p.cartLocked) return true;
+      const info = this.getSupportInfo(body, excludeBody);
+      if (!info.supported) return false;
+      const w = Math.max(1, body.bounds.max.x - body.bounds.min.x);
+      const h = Math.max(1, body.bounds.max.y - body.bounds.min.y);
+      const tall = h > w * 1.25;
+      const nearGridAngle = this.angleDistanceToRightAngle(body.angle || 0) < 0.22;
+      const enoughFoot = info.width >= this.CELL * (tall ? 0.92 : 0.56) || info.count >= 2;
+      // 支撑必须接近重心下方。窄支撑 + 高重心的组合不算坐稳，应让它自然倒下。
+      return info.centerSupported && enoughFoot && (!tall || !info.narrow || !nearGridAngle);
+    }
+
+    nudgeUnstablePiece(body) {
+      const p = body && body.plugin && body.plugin.piece;
+      if (!p || p.inAir || p.missed || p.cartLocked || p.frozen) return;
+      const info = this.getSupportInfo(body);
+      if (!info.supported || this.isWellSeated(body)) return;
+      const w = Math.max(1, body.bounds.max.x - body.bounds.min.x);
+      const h = Math.max(1, body.bounds.max.y - body.bounds.min.y);
+      const tallOrNarrow = h > w * 1.12 || info.width < this.CELL * 0.62;
+      if (!tallOrNarrow) return;
+      let dir = body.position.x >= info.supportCenter ? 1 : -1;
+      if (Math.abs(body.position.x - info.supportCenter) < this.CELL * 0.10) dir = Math.sin(body.angle || 0) >= 0 ? 1 : -1;
+      const av = body.angularVelocity || 0;
+      this.Body.setAngularVelocity(body, this.clamp(av + dir * 0.0065, -0.105, 0.105));
+      // 给一点极小横向滑动，打破“不科学的一边抖动一边不掉”的局部平衡。
+      const vx = this.clamp((body.velocity.x || 0) + dir * 0.018, -1.35, 1.35);
+      this.Body.setVelocity(body, { x: vx, y: Math.max(body.velocity.y || 0, 0.18) });
     }
 
     contactAxis(pair) {
@@ -843,7 +928,9 @@
         const p = ent.body.plugin && ent.body.plugin.piece;
         if (!p || p.inAir || p.missed) return false;
         if (p.cartLocked) return true;
-        return this.hasDownwardSupport(ent.body) || this.hasIndependentSupport(ent.body, other && other.body);
+        // 急冻/熔岩/普通冻结都必须建立在“这个方块自己能稳定待住”的基础上。
+        // 这可以避免本该掉下去的侧挂方块被急冻强行定住。
+        return this.isWellSeated(ent.body, other && other.body);
       };
 
       if (axis === 'side') {
@@ -895,21 +982,29 @@
           const v = this.Vector.magnitude(body.velocity || { x: 0, y: 0 });
           const supported = this.hasPhysicalSupport(body);
           if (supported) {
-            if (v < 4.8) {
-              this.Body.setVelocity(body, { x: body.velocity.x * 0.80, y: Math.max(0, body.velocity.y) * 0.98 });
-              this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.54);
+            const wellSeated = this.isWellSeated(body);
+            if (wellSeated) {
+              if (v < 4.8) {
+                this.Body.setVelocity(body, { x: body.velocity.x * 0.80, y: Math.max(0, body.velocity.y) * 0.98 });
+                this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.54);
+              } else {
+                this.Body.setVelocity(body, { x: body.velocity.x * 0.90, y: body.velocity.y * 0.985 });
+                this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.70);
+              }
+              if (v < 0.14 && Math.abs(body.angularVelocity || 0) < 0.005) {
+                this.Body.setVelocity(body, { x: 0, y: 0 });
+                this.Body.setAngularVelocity(body, 0);
+              }
             } else {
-              this.Body.setVelocity(body, { x: body.velocity.x * 0.90, y: body.velocity.y * 0.985 });
-              this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.70);
-            }
-            if (v < 0.14 && Math.abs(body.angularVelocity || 0) < 0.005) {
-              this.Body.setVelocity(body, { x: 0, y: 0 });
-              this.Body.setAngularVelocity(body, 0);
+              // 有接触但重心不稳：不要套用“稳定堆叠阻尼”。保留连续倾倒过程，并主动破除小幅抽搐平衡。
+              this.Body.setVelocity(body, { x: body.velocity.x * 0.95, y: Math.max(body.velocity.y, 0.18) });
+              this.Body.setAngularVelocity(body, this.clamp((body.angularVelocity || 0) * 0.98, -0.11, 0.11));
+              this.nudgeUnstablePiece(body);
             }
           } else {
             // 没支撑时不要把下落速度抹掉，避免碰撞后的短暂“太空漂浮”。
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.92, y: Math.max(body.velocity.y, 0.25) });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.90);
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.94, y: Math.max(body.velocity.y, 0.34) });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.94);
           }
         }
 
@@ -921,9 +1016,11 @@
 
         if (this.activePiece === body) {
           const hasContact = p.touchedStack && this.hasPhysicalSupport(body);
+          const wellSeated = this.isWellSeated(body);
           const slowEnough = Math.abs(body.velocity.y) < 1.45 && this.Vector.magnitude(body.velocity) < 2.2;
           const livedEnough = !p.inAir && this.currentTime - Math.max(p.bornAt, p.releasedAt || 0) > 0.42;
-          if (!p.inAir && hasContact && slowEnough && livedEnough) {
+          // 只有真正坐稳的方块才算落定；像竖着的闪电这种重心不稳的结构会继续自然倾倒。
+          if (!p.inAir && hasContact && wellSeated && slowEnough && livedEnough) {
             p.settled = true;
             p.active = false;
             this.activePiece = null;
@@ -1977,21 +2074,39 @@
       if (!body || this.gameOver || !this.gameStarted) return;
       const p = body.plugin && body.plugin.piece;
       if (!p || !p.inAir || p.missed) return;
-      const pos = this.worldToScreen(body.position.x, body.position.y);
+
+      // 辅助线显示“方块横向覆盖范围”，不是中轴线。
+      // 例如三格 I 横放时是宽 3 格的两条边界线，竖放时是宽 1 格的两条边界线。
+      const left = body.bounds.min.x;
+      const right = body.bounds.max.x;
+      const top = Math.min(body.bounds.min.y, this.screenToWorldY(10));
+      const bottom = this.screenToWorldY(this.H - 118);
+      const l = this.worldToScreen(left, top);
+      const r = this.worldToScreen(right, top);
+      const lb = this.worldToScreen(left, bottom);
+      const rb = this.worldToScreen(right, bottom);
+      const midTop = this.worldToScreen((left + right) / 2, top);
+      const midBottom = this.worldToScreen((left + right) / 2, bottom);
+
       ctx.save();
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.56)';
-      ctx.lineWidth = 2;
+      ctx.fillStyle = 'rgba(234, 255, 255, 0.10)';
+      ctx.fillRect(Math.min(l.x, r.x), Math.max(0, midTop.y), Math.abs(r.x - l.x), Math.min(this.H - 120, midBottom.y) - Math.max(0, midTop.y));
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.70)';
+      ctx.lineWidth = 2.3;
       ctx.setLineDash([8, 7]);
       ctx.beginPath();
-      ctx.moveTo(pos.x, Math.max(0, pos.y - 120 * this.cameraScale));
-      ctx.lineTo(pos.x, this.H - 120);
+      ctx.moveTo(l.x, Math.max(0, l.y - 120 * this.cameraScale));
+      ctx.lineTo(lb.x, this.H - 120);
+      ctx.moveTo(r.x, Math.max(0, r.y - 120 * this.cameraScale));
+      ctx.lineTo(rb.x, this.H - 120);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.globalAlpha = 0.45;
-      ctx.fillStyle = '#eaffff';
+      ctx.strokeStyle = 'rgba(255,255,255,0.32)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(pos.x, this.H - 120, 4, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(midTop.x, Math.max(0, midTop.y - 120 * this.cameraScale));
+      ctx.lineTo(midBottom.x, this.H - 120);
+      ctx.stroke();
       ctx.restore();
     }
 
