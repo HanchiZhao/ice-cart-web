@@ -1,7 +1,7 @@
 /*
   叠冰塔 Ice Cart - 单文件核心逻辑
   玩法：移动小车接住随机下落的俄罗斯方块形冰块；方块只能旋转，不能左右移动；空中按俄罗斯方块节奏匀速下落。
-  计分：按小格计数。失败：按“大方块/整件方块”计数，掉出小车外达到 2 件则游戏结束。
+  计分：按大方块计数。失败：按“大方块/整件方块”计数，掉出小车外达到 2 件则游戏结束。
 */
 
 (function () {
@@ -54,14 +54,14 @@
       this.CART_MIN_WIDTH = 202;
       this.CART_MAX_WIDTH = 305;
       this.CART_WALL_H = 92;
-      this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
+      this.CART_EDGE_OVERHANG = this.CELL * 1.75; // 允许小车边缘适度移出屏幕，保证更大的接块与摆放范围
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 650;      // 小车真实最大移动速度，px/s；继续降低高速拖车导致的嵌入/挤飞风险
+      this.CART_MAX_SPEED = 620;      // 小车真实最大移动速度，px/s；继续限制高速拖车导致的嵌入/挤飞风险
       this.GRAVITY = 0.68;
       this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
       this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
-      this.MIN_CAMERA_SCALE = 0.36;
-      this.MAX_CAMERA_SCALE = 0.92;
+      this.MIN_CAMERA_SCALE = 0.30;
+      this.MAX_CAMERA_SCALE = 0.74; // 初始/最大视角更开阔，保证边缘方块也能被小车接到任意位置
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
       this.STABLE_SPEED = 2.45;       // 冻结计时速度阈值放宽，轻微晃动不再清空计时
       this.STABLE_ANGULAR = 0.082;    // 冻结计时角速度阈值放宽
@@ -70,12 +70,14 @@
       this.spawnCount = 0;            // 已生成的大方块数量，用于开局特殊生成规则
       this.firstFiveQuickFreezeSlots = this.makeOpeningQuickFreezeSlots(); // 前5个中固定出现2个急冻
 
-      this.engine = this.Engine.create({ enableSleeping: true });
+      this.engine = this.Engine.create({ enableSleeping: false }); // 关闭 sleeping，避免方块碰撞后“定在半空”
       this.world = this.engine.world;
       this.engine.gravity.y = this.GRAVITY;
       this.engine.positionIterations = 12;
       this.engine.velocityIterations = 10;
       this.engine.constraintIterations = 6;
+      // 全局进一步降低弹性残留；目前版本严禁任何弹跳。
+      this.engine.timing.timeScale = 1;
 
       this.W = 390;
       this.H = 844;
@@ -98,8 +100,8 @@
       this.gameOver = false;
       this.gameStarted = true;
 
-      this.cameraScale = 0.92;
-      this.targetCameraScale = 0.92;
+      this.cameraScale = 0.74;
+      this.targetCameraScale = 0.74;
       this.activeFlatKeys = new Set();
       this.activeStableKeys = new Set();
       this.contactTimers = new Map();
@@ -147,11 +149,6 @@
           id: 'I3', name: '三格I', kind: 'ice', weight: 0.85,
           cells: [[0, -1], [0, 0], [0, 1]],
           palette: ['#9fd9ff', '#71c4ee', '#d5f5ff']
-        },
-        {
-          id: 'I4', name: '四格I', kind: 'ice', weight: 0.85,
-          cells: [[0, -1.5], [0, -0.5], [0, 0.5], [0, 1.5]],
-          palette: ['#f1b6d5', '#df8fbd', '#ffd6e9']
         },
         {
           id: 'T4', name: 'T', kind: 'ice', weight: 1.0,
@@ -377,11 +374,16 @@
       // 生成范围按“当前可视世界宽度”的比例计算。
       // 初始视角时更靠中间，避免贴边生成；冰塔越高、镜头越远，生成范围会随可视世界平滑变宽。
       const zoomT = this.clamp((this.cameraScale - this.MIN_CAMERA_SCALE) / Math.max(0.001, this.MAX_CAMERA_SCALE - this.MIN_CAMERA_SCALE), 0, 1);
-      const sideRatio = 0.13 + 0.09 * zoomT; // zoomT=1: 两侧各留 22%；zoomT=0: 两侧各留 13%
+      // 生成范围和可视世界宽度成比例：视野越开阔，范围越大；但初始也不会贴边。
+      // 同时用小车实际可移动范围裁剪，保证任意生成位置都能被小车接到。
+      const sideRatio = 0.18 - 0.07 * (1 - zoomT); // 初始约18%，后期视野拉远后约11%
       const leftScreen = this.W * sideRatio;
       const rightScreen = this.W * (1 - sideRatio);
       let left = this.screenToWorldX(leftScreen);
       let right = this.screenToWorldX(rightScreen);
+      const bounds = this.getCartMoveBounds();
+      left = Math.max(left, bounds.minX - this.cartW / 2 + this.CELL * 1.1);
+      right = Math.min(right, bounds.maxX + this.cartW / 2 - this.CELL * 1.1);
 
       // 按形状自身宽度继续缩一点，避免长条刚生成就贴住边缘。
       const cells = def && def.cells ? def.cells : [[0, 0]];
@@ -413,9 +415,9 @@
         const [cx, cy] = def.cells[i];
         const part = this.Bodies.rectangle(spawnX + cx * this.CELL, spawnY + cy * this.CELL, cellSize, cellSize, {
           chamfer: { radius: 1.2 },
-          friction: 2.25,
-          frictionStatic: 4.2,
-          frictionAir: 0.072,
+          friction: 3.0,
+          frictionStatic: 6.0,
+          frictionAir: 0.095,
           restitution: 0.0,
           slop: 0.045,
           sleepThreshold: 34,
@@ -431,9 +433,9 @@
       } else {
         body = this.Body.create({
           parts,
-          friction: 2.25,
-          frictionStatic: 4.2,
-          frictionAir: 0.072,
+          friction: 3.0,
+          frictionStatic: 6.0,
+          frictionAir: 0.095,
           restitution: 0.0,
           slop: 0.045,
           sleepThreshold: 34,
@@ -629,20 +631,17 @@
     }
 
     findKinematicContactY(body, oldY, nextY) {
-      // 正常情况下 oldY 未碰撞、nextY 已碰撞；二分后落在接触临界点上方约 0.15px。
+      // 正常情况下 oldY 未碰撞、nextY 已碰撞；二分后落在接触临界点。
+      // 如果 oldY 已经碰撞，通常是小车挡板从侧面碰到了空中方块。
+      // 这种情况不能再把方块向上回退，否则视觉上就会像“弹到离小车一段距离”。
       let lo = oldY;
       let hi = nextY;
       this.Body.setPosition(body, { x: body.position.x, y: lo });
       if (this.kinematicTouchesStack(body)) {
-        // 极少数情况下上一帧已经插入，才向上细调；步长很小，避免肉眼可见的“弹起”。
-        for (let i = 0; i < 16 && this.kinematicTouchesStack(body); i++) {
-          lo -= 0.35;
-          this.Body.setPosition(body, { x: body.position.x, y: lo });
-        }
         return lo;
       }
 
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 16; i++) {
         const mid = (lo + hi) / 2;
         this.Body.setPosition(body, { x: body.position.x, y: mid });
         if (this.kinematicTouchesStack(body)) hi = mid;
@@ -687,33 +686,68 @@
       this.Body.setStatic(body, false);
       if (this.Sleeping) this.Sleeping.set(body, false);
       // 释放时不给任何向上/水平速度；只给几乎不可见的向下速度让重力接手，严禁“刚落地弹起”。
-      const releaseY = 0.012;
+      const releaseY = Math.max(0.55, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 120);
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
-      p.noPopUntil = this.currentTime + 0.65;
+      p.noPopUntil = this.currentTime + 0.42;
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
     }
 
     antiPopStabilizer(dt) {
-      // 全局防弹飞保险：这个游戏当前阶段不需要任何弹性。
-      // 若物理求解器因为高速拖车/轻微嵌入产生异常速度，这里会立刻削掉。
+      // 全局防弹飞保险：当前版本严禁任何弹性。
+      // 只削掉异常向上速度和横向冲量；若方块其实没有支撑，就不要把向下速度过度抹掉，避免“太空漂浮”。
       for (const body of this.pieces.values()) {
         const p = body.plugin && body.plugin.piece;
         if (!p || p.missed || p.inAir || p.cartLocked) continue;
-        const nearCart = body.bounds.max.y > this.cartY - this.CART_WALL_H - this.CELL * 3.5 && body.bounds.min.y < this.cartY + this.CELL * 2.6;
-        const nearX = body.bounds.max.x > this.cartX - this.cartW / 2 - this.CELL * 2 && body.bounds.min.x < this.cartX + this.cartW / 2 + this.CELL * 2;
+        const nearCart = body.bounds.max.y > this.cartY - this.CART_WALL_H - this.CELL * 3.8 && body.bounds.min.y < this.cartY + this.CELL * 2.8;
+        const nearX = body.bounds.max.x > this.cartX - this.cartW / 2 - this.CELL * 2.5 && body.bounds.min.x < this.cartX + this.cartW / 2 + this.CELL * 2.5;
         if (!nearCart || !nearX) continue;
 
+        const supported = this.hasPhysicalSupport(body);
         const inLandingGrace = p.noPopUntil && this.currentTime < p.noPopUntil;
-        const vxLimit = inLandingGrace ? 1.8 : 4.2;
-        const vyUpLimit = inLandingGrace ? -0.04 : -0.32; // 严禁莫名向上弹起
-        const vyDownLimit = inLandingGrace ? 3.8 : 7.0;
-        let vx = this.clamp(body.velocity.x || 0, -vxLimit, vxLimit);
-        let vy = this.clamp(body.velocity.y || 0, vyUpLimit, vyDownLimit);
-        if ((body.velocity.y || 0) < vyUpLimit) vy = 0;
-        this.Body.setVelocity(body, { x: vx * (inLandingGrace ? 0.62 : 0.82), y: vy * (inLandingGrace ? 0.78 : 0.88) });
-        this.Body.setAngularVelocity(body, this.clamp((body.angularVelocity || 0) * (inLandingGrace ? 0.38 : 0.58), -0.035, 0.035));
+        let vx = body.velocity.x || 0;
+        let vy = body.velocity.y || 0;
+        const av = body.angularVelocity || 0;
+
+        // 永远不允许明显向上弹起。
+        if (vy < -0.02) vy = 0;
+
+        if (supported) {
+          const vxLimit = inLandingGrace ? 1.25 : 3.2;
+          vx = this.clamp(vx, -vxLimit, vxLimit) * (inLandingGrace ? 0.54 : 0.74);
+          vy = this.clamp(vy, 0, inLandingGrace ? 5.2 : 8.0) * (inLandingGrace ? 0.92 : 0.98);
+          this.Body.setAngularVelocity(body, this.clamp(av * (inLandingGrace ? 0.36 : 0.56), -0.032, 0.032));
+        } else {
+          // 没有支撑时让重力正常接手，避免悬停；只限制水平漂移和转速。
+          vx = this.clamp(vx * 0.72, -2.2, 2.2);
+          vy = Math.max(vy, 0.35);
+          this.Body.setAngularVelocity(body, this.clamp(av * 0.70, -0.045, 0.045));
+        }
+        this.Body.setVelocity(body, { x: vx, y: vy });
       }
+    }
+
+    hasPhysicalSupport(body) {
+      if (!body) return false;
+      const activeParts = body.parts && body.parts.length > 1 ? body.parts.slice(1) : [body];
+      const targets = [];
+      for (const cartPart of this.cartBodies) if (cartPart) targets.push(cartPart);
+      for (const other of this.pieces.values()) {
+        if (!other || other === body) continue;
+        const op = other.plugin && other.plugin.piece;
+        if (!op || op.missed || op.inAir) continue;
+        if (other.parts && other.parts.length > 1) targets.push(...other.parts.slice(1));
+        else targets.push(other);
+      }
+      if (!targets.length) return false;
+      for (const part of activeParts) {
+        const hits = this.Query.collides(part, targets);
+        for (const h of hits) {
+          const n = h.collision && h.collision.normal ? h.collision.normal : null;
+          if (!n || Math.abs(n.y) > 0.45 || Math.abs(n.x) > 0.45) return true;
+        }
+      }
+      return false;
     }
 
     updateLockedBodies() {
@@ -733,7 +767,7 @@
     }
 
     updatePieceStates() {
-      let cells = 0;
+      let cells = 0; // 现在按“大方块”计数，不再按小格计数
       let currentTop = this.cartY;
       for (const body of Array.from(this.pieces.values())) {
         const p = body.plugin.piece;
@@ -754,27 +788,34 @@
         // 进入真实物理后，给低速堆叠体一点“冰砖静摩擦/休眠”阻尼，减少长时间抖动、穿模和卡出小车。
         if (!p.inAir && p.touchedStack && !p.cartLocked) {
           const v = this.Vector.magnitude(body.velocity || { x: 0, y: 0 });
-          if (v < 4.8) {
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.86, y: body.velocity.y * 0.92 });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.64);
+          const supported = this.hasPhysicalSupport(body);
+          if (supported) {
+            if (v < 4.8) {
+              this.Body.setVelocity(body, { x: body.velocity.x * 0.80, y: Math.max(0, body.velocity.y) * 0.98 });
+              this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.54);
+            } else {
+              this.Body.setVelocity(body, { x: body.velocity.x * 0.90, y: body.velocity.y * 0.985 });
+              this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.70);
+            }
+            if (v < 0.14 && Math.abs(body.angularVelocity || 0) < 0.005) {
+              this.Body.setVelocity(body, { x: 0, y: 0 });
+              this.Body.setAngularVelocity(body, 0);
+            }
           } else {
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.94, y: body.velocity.y * 0.965 });
+            // 没支撑时不要把下落速度抹掉，避免碰撞后的短暂“太空漂浮”。
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.84, y: Math.max(body.velocity.y, 0.28) });
             this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.78);
-          }
-          if (v < 0.16 && Math.abs(body.angularVelocity || 0) < 0.006) {
-            this.Body.setVelocity(body, { x: 0, y: 0 });
-            this.Body.setAngularVelocity(body, 0);
           }
         }
 
         const overlapsCartWidth = body.bounds.max.x > this.cartX - this.cartW / 2 - 12 && body.bounds.min.x < this.cartX + this.cartW / 2 + 12;
         const aboveCartFloor = body.bounds.max.y < this.cartY + 52;
         if ((p.touchedStack || p.cartLocked) && overlapsCartWidth && aboveCartFloor) {
-          cells += p.cellCount;
+          cells += 1;
         }
 
         if (this.activePiece === body) {
-          const hasContact = p.touchedStack;
+          const hasContact = p.touchedStack && this.hasPhysicalSupport(body);
           const slowEnough = Math.abs(body.velocity.y) < 1.45 && this.Vector.magnitude(body.velocity) < 2.2;
           const livedEnough = !p.inAir && this.currentTime - Math.max(p.bornAt, p.releasedAt || 0) > 0.42;
           if (!p.inAir && hasContact && slowEnough && livedEnough) {
@@ -1143,8 +1184,8 @@
       this.gameOver = false;
       this.spawnCount = 0;
       this.firstFiveQuickFreezeSlots = this.makeOpeningQuickFreezeSlots();
-      this.cameraScale = 0.92;
-      this.targetCameraScale = 0.92;
+      this.cameraScale = 0.74;
+      this.targetCameraScale = 0.74;
       this.cartX = this.W / 2;
       this.cartTargetX = this.cartX;
       this.cartVX = 0;
