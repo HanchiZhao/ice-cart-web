@@ -56,13 +56,13 @@
       this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
       this.CART_FLOOR_H = 16;
       this.CART_MAX_SPEED = 1320;     // 小车真实最大移动速度，px/s；防止高速拖动造成卡死/穿模
-      this.GRAVITY = 0.86;
+      this.GRAVITY = 0.78;
       this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
       this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
       this.MIN_CAMERA_SCALE = 0.36;
       this.MAX_CAMERA_SCALE = 0.92;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
-      this.STABLE_SPEED = 1.15;       // 16 秒冻结计时的相对速度阈值
+      this.STABLE_SPEED = 1.05;       // 冻结计时的相对速度阈值：更稳才开始计时
       this.STABLE_ANGULAR = 0.035;    // 16 秒冻结计时的角速度阈值
 
       this.engine = this.Engine.create({ enableSleeping: true });
@@ -163,7 +163,7 @@
           palette: ['#c779a7', '#b55d8c', '#e7a5c7']
         },
         {
-          id: 'QF1', name: '急冻', kind: 'quickFreeze', weight: 0.28,
+          id: 'QF1', name: '急冻', kind: 'quickFreeze', weight: 2.05,
           cells: [[0, 0]],
           palette: ['#7ef4f3', '#17dce0', '#f0ffff']
         },
@@ -265,34 +265,39 @@
       // 所有部位都参与碰撞，也都被视为“开局已冻结”的冰块结构。
       const floor = this.Bodies.rectangle(this.cartX, this.cartY, this.cartW, this.CART_FLOOR_H, {
         isStatic: true,
-        friction: 1.0,
-        restitution: 0.02,
+        friction: 1.6,
+        frictionStatic: 2.4,
+        restitution: 0.0,
         label: 'cart_floor'
       });
       const left = this.Bodies.rectangle(this.cartX - this.cartW / 2 + 8, this.cartY - this.CART_WALL_H / 2, 16, this.CART_WALL_H, {
         isStatic: true,
-        friction: 1.0,
-        restitution: 0.02,
+        friction: 1.6,
+        frictionStatic: 2.4,
+        restitution: 0.0,
         label: 'cart_left'
       });
       const right = this.Bodies.rectangle(this.cartX + this.cartW / 2 - 8, this.cartY - this.CART_WALL_H / 2, 16, this.CART_WALL_H, {
         isStatic: true,
-        friction: 1.0,
-        restitution: 0.02,
+        friction: 1.6,
+        frictionStatic: 2.4,
+        restitution: 0.0,
         label: 'cart_right'
       });
       const shelfW = this.CELL * 1.08;
       const shelfH = 12;
       const leftShelf = this.Bodies.rectangle(this.cartX - this.cartW / 2 + 8 - shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
         isStatic: true,
-        friction: 1.0,
-        restitution: 0.02,
+        friction: 1.6,
+        frictionStatic: 2.4,
+        restitution: 0.0,
         label: 'cart_left_top_platform'
       });
       const rightShelf = this.Bodies.rectangle(this.cartX + this.cartW / 2 - 8 + shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
         isStatic: true,
-        friction: 1.0,
-        restitution: 0.02,
+        friction: 1.6,
+        frictionStatic: 2.4,
+        restitution: 0.0,
         label: 'cart_right_top_platform'
       });
       [floor, left, right, leftShelf, rightShelf].forEach((b) => {
@@ -369,12 +374,12 @@
         const [cx, cy] = def.cells[i];
         const part = this.Bodies.rectangle(spawnX + cx * this.CELL, spawnY + cy * this.CELL, cellSize, cellSize, {
           chamfer: { radius: 2 },
-          friction: 1.08,
-          frictionStatic: 1.65,
-          frictionAir: 0.022,
+          friction: 1.7,
+          frictionStatic: 2.85,
+          frictionAir: 0.048,
           restitution: 0.0,
-          slop: 0.006,
-          sleepThreshold: 42,
+          slop: 0.018,
+          sleepThreshold: 34,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece_part'
         });
@@ -387,12 +392,12 @@
       } else {
         body = this.Body.create({
           parts,
-          friction: 1.08,
-          frictionStatic: 1.65,
-          frictionAir: 0.022,
+          friction: 1.7,
+          frictionStatic: 2.85,
+          frictionAir: 0.048,
           restitution: 0.0,
-          slop: 0.006,
-          sleepThreshold: 42,
+          slop: 0.018,
+          sleepThreshold: 34,
           density: def.kind === 'dirt' ? 0.0046 : 0.0028,
           label: 'piece'
         });
@@ -526,12 +531,12 @@
         if (!nearCart) continue;
 
         if (this.Sleeping) this.Sleeping.set(body, false);
-        const factor = this.clamp(0.18 + Math.abs(targetVX) / 80, 0.18, 0.45);
+        const factor = this.clamp(0.24 + Math.abs(targetVX) / 95, 0.24, 0.50);
         this.Body.setVelocity(body, {
           x: body.velocity.x + (targetVX - body.velocity.x) * factor,
           y: body.velocity.y
         });
-        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.94);
+        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.86);
       }
     }
 
@@ -557,7 +562,7 @@
         for (let i = 0; i < 34 && this.kinematicTouchesStack(body); i++) {
           this.Body.setPosition(body, { x: body.position.x, y: body.position.y - 1 });
         }
-        this.Body.setPosition(body, { x: body.position.x, y: body.position.y + 0.6 });
+        // 不再向下压入接触面，避免释放物理瞬间产生分离弹力。
         this.releasePiecePhysics(body);
       }
     }
@@ -597,7 +602,8 @@
       p.touchedStack = true;
       this.Body.setStatic(body, false);
       if (this.Sleeping) this.Sleeping.set(body, false);
-      const releaseY = Math.max(0.72, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 78);
+      // 释放时只给极小向下速度；主要让重力自然接手，避免“刚落地就弹起”。
+      const releaseY = Math.min(0.36, Math.max(0.16, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 260));
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
@@ -641,13 +647,14 @@
         // 进入真实物理后，给低速堆叠体一点“冰砖静摩擦/休眠”阻尼，减少长时间抖动、穿模和卡出小车。
         if (!p.inAir && p.touchedStack && !p.cartLocked) {
           const v = this.Vector.magnitude(body.velocity || { x: 0, y: 0 });
-          if (v < 3.4) {
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.965, y: body.velocity.y * 0.985 });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.90);
+          if (v < 4.8) {
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.925, y: body.velocity.y * 0.965 });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.78);
           } else {
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.96);
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.985, y: body.velocity.y * 0.992 });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.88);
           }
-          if (v < 0.10 && Math.abs(body.angularVelocity || 0) < 0.003) {
+          if (v < 0.16 && Math.abs(body.angularVelocity || 0) < 0.006) {
             this.Body.setVelocity(body, { x: 0, y: 0 });
             this.Body.setAngularVelocity(body, 0);
           }
@@ -886,8 +893,8 @@
         pointA: { x: 0, y: 0 },
         pointB: { x: 0, y: 0 },
         length: dist,
-        stiffness: immediate ? 0.98 : 0.9,
-        damping: 0.08
+        stiffness: immediate ? 0.98 : 0.92,
+        damping: 0.22
       });
       const c2 = this.Constraint.create({
         bodyA: a,
@@ -895,8 +902,8 @@
         pointA: { x: this.CELL * 0.38, y: this.CELL * 0.16 },
         pointB: { x: this.CELL * 0.38, y: this.CELL * 0.16 },
         length: dist,
-        stiffness: immediate ? 0.86 : 0.74,
-        damping: 0.1
+        stiffness: immediate ? 0.90 : 0.78,
+        damping: 0.24
       });
       this.World.add(this.world, [c1, c2]);
       this.bonds.push({ type: 'piece', a: a.id, b: b.id, constraints: [c1, c2] });
