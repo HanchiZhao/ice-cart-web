@@ -1,6 +1,6 @@
 /*
   叠冰塔 Ice Cart - 单文件核心逻辑
-  玩法：移动小车接住随机下落的俄罗斯方块形冰块；方块只能旋转，不能左右移动；小车有惯性。
+  玩法：移动小车接住随机下落的俄罗斯方块形冰块；方块只能旋转，不能左右移动；空中按俄罗斯方块节奏一格一格下落。
   计分：按小格计数。失败：按“大方块/整件方块”计数，掉出小车外达到 2 件则游戏结束。
 */
 
@@ -52,11 +52,11 @@
       this.CART_MAX_WIDTH = 335;
       this.CART_WALL_H = 92;
       this.CART_FLOOR_H = 16;
-      this.CART_SPRING = 24;          // 小车追随手指的弹簧强度
-      this.CART_DAMPING = 0.80;       // 小车阻尼，越低越有惯性甩动
-      this.CART_MAX_SPEED = 980;      // 小车最大水平速度，px/s
+      this.CART_MAX_SPEED = 1600;     // 只用于限制极端拖动输入，px/s
       this.GRAVITY = 0.86;
-      this.FAST_DROP_SPEED = 12.8;    // 按“下落”时的最大下落速度
+      this.GRID_FALL_INTERVAL = 0.58; // 普通下落：约每 0.58 秒下降一格
+      this.FAST_GRID_INTERVAL = 0.075;// 按住“下落”：快速一格一格下降
+      this.GRID_STEP_SMOOTH = 14;     // 格落动画平滑度；越大越贴近目标格
       this.MIN_CAMERA_SCALE = 0.36;
       this.MAX_CAMERA_SCALE = 1.0;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
@@ -297,11 +297,11 @@
       const def = this.weightedChoice(this.shapes);
       const margin = this.CELL * 2.2;
       const spawnX = this.random(margin, this.W - margin);
-      const spawnY = this.cartY - Math.max(520, this.H * 0.68) / this.cameraScale;
+      const spawnY = this.screenToWorldY(82);
       const angle = Math.floor(this.random(0, 4)) * Math.PI / 2;
       const id = 'p' + Math.floor(Math.random() * 1e9).toString(36) + '_' + Date.now().toString(36);
       const parts = [];
-      const cellSize = this.CELL * 0.93;
+      const cellSize = this.CELL * 0.995;
 
       for (let i = 0; i < def.cells.length; i++) {
         const [cx, cy] = def.cells[i];
@@ -332,11 +332,12 @@
         });
       }
       this.Body.setAngle(body, angle);
-      this.Body.setVelocity(body, { x: this.random(-0.4, 0.4), y: 0 });
-      this.Body.setAngularVelocity(body, this.random(-0.012, 0.012));
+      this.Body.setVelocity(body, { x: 0, y: 0 });
+      this.Body.setAngularVelocity(body, 0);
 
       const visualParts = body.parts.length > 1 ? body.parts.slice(1) : [body];
-      const cellData = visualParts.map((_, i) => ({
+      const visualCells = visualParts.map((part) => this.worldOffsetToLocal(body, part.position.x - body.position.x, part.position.y - body.position.y));
+      const cellData = visualCells.map((_, i) => ({
         cracks: this.makeCracks(i + body.id * 17),
         wobble: this.random(0, Math.PI * 2)
       }));
@@ -353,14 +354,23 @@
         missed: false,
         settled: false,
         active: true,
+        inAir: true,
+        releasedAt: 0,
+        dropTimer: 0,
+        airTargetY: body.position.y,
         cartLocked: false,
         lockRel: null,
         bornAt: this.currentTime,
         visualParts,
+        visualCells,
+        shapeCells: def.cells.map((c) => [c[0], c[1]]),
         cellData,
         frostedAt: 0
       };
 
+      // 空中阶段不交给自由落体，也不允许重心导致自转。
+      // 它会像俄罗斯方块一样按格下落；第一次接触小车/堆叠体后才释放为真实物理刚体。
+      this.Body.setStatic(body, true);
       this.pieces.set(body.id, body);
       this.World.add(this.world, body);
       this.activePiece = body;
@@ -389,10 +399,7 @@
           this.scheduleSpawn(250);
         }
 
-        if (this.dropHeld && this.activePiece) {
-          const v = this.activePiece.velocity;
-          this.Body.setVelocity(this.activePiece, { x: v.x, y: Math.min(this.FAST_DROP_SPEED, v.y + 0.72) });
-        }
+        this.updateActiveKinematicPiece(dt);
 
         this.activeFlatKeys.clear();
         this.activeStableKeys.clear();
@@ -415,16 +422,47 @@
       const maxX = this.W - this.cartW / 2 - 24;
       this.cartTargetX = this.clamp(this.cartTargetX, minX, maxX);
       const oldX = this.cartX;
-      const accel = (this.cartTargetX - this.cartX) * this.CART_SPRING;
-      this.cartVX += accel * dt;
-      this.cartVX *= Math.pow(this.CART_DAMPING, dt * 60);
-      this.cartVX = this.clamp(this.cartVX, -this.CART_MAX_SPEED, this.CART_MAX_SPEED);
-      this.cartX += this.cartVX * dt;
+
+      // 新手感：小车实时跟随手指，不再用弹簧慢慢追。
+      // 但仍把本帧位移换算成物理速度，车内方块会受到急停、急拉带来的惯性影响。
+      this.cartX = this.cartTargetX;
       this.cartX = this.clamp(this.cartX, minX, maxX);
-      if ((this.cartX === minX && this.cartVX < 0) || (this.cartX === maxX && this.cartVX > 0)) this.cartVX *= -0.18;
       const dx = this.cartX - oldX;
-      this.cartMatterVX = dt > 0 ? dx / (dt * 60) : 0;
+      this.cartVX = dt > 0 ? this.clamp(dx / dt, -this.CART_MAX_SPEED, this.CART_MAX_SPEED) : 0;
+      this.cartMatterVX = dt > 0 ? this.clamp(dx / (dt * 60), -26, 26) : 0;
       this.placeCartBodies(this.cartX, this.cartY, this.cartMatterVX);
+    }
+
+    updateActiveKinematicPiece(dt) {
+      const body = this.activePiece;
+      if (!body || this.gameOver) return;
+      const p = body.plugin.piece;
+      if (!p || !p.inAir || p.missed || p.cartLocked) return;
+
+      const interval = this.dropHeld ? this.FAST_GRID_INTERVAL : this.GRID_FALL_INTERVAL;
+      p.dropTimer += dt;
+      while (p.dropTimer >= interval) {
+        p.dropTimer -= interval;
+        p.airTargetY += this.CELL;
+      }
+
+      const smooth = 1 - Math.pow(0.0008, dt * this.GRID_STEP_SMOOTH);
+      const nextY = body.position.y + (p.airTargetY - body.position.y) * smooth;
+      this.Body.setPosition(body, { x: body.position.x, y: nextY });
+      this.Body.setVelocity(body, { x: 0, y: 0 });
+      this.Body.setAngularVelocity(body, 0);
+    }
+
+    releasePiecePhysics(body) {
+      const p = body && body.plugin ? body.plugin.piece : null;
+      if (!p || !p.inAir || p.missed) return;
+      p.inAir = false;
+      p.releasedAt = this.currentTime;
+      p.airTargetY = body.position.y;
+      this.Body.setStatic(body, false);
+      this.Body.setVelocity(body, { x: 0, y: 0.35 });
+      this.Body.setAngularVelocity(body, 0);
+      this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
     }
 
     updateLockedBodies() {
@@ -467,8 +505,8 @@
         if (this.activePiece === body) {
           const hasContact = p.touchedStack;
           const slowEnough = Math.abs(body.velocity.y) < 1.45 && this.Vector.magnitude(body.velocity) < 2.2;
-          const livedEnough = this.currentTime - p.bornAt > 0.45;
-          if (hasContact && slowEnough && livedEnough) {
+          const livedEnough = !p.inAir && this.currentTime - Math.max(p.bornAt, p.releasedAt || 0) > 0.42;
+          if (!p.inAir && hasContact && slowEnough && livedEnough) {
             p.settled = true;
             p.active = false;
             this.activePiece = null;
@@ -518,9 +556,11 @@
     rotateActivePiece() {
       if (!this.activePiece || this.gameOver) return;
       const p = this.activePiece.plugin.piece;
-      if (!p || !p.active || p.cartLocked) return;
+      // 只有仍在空中、仍按俄罗斯方块方式下落时可以旋转；接触后交给物理，不再强行拧动。
+      if (!p || !p.active || !p.inAir || p.cartLocked) return;
       this.Body.rotate(this.activePiece, Math.PI / 2);
-      this.Body.setAngularVelocity(this.activePiece, 0.02);
+      this.Body.setVelocity(this.activePiece, { x: 0, y: 0 });
+      this.Body.setAngularVelocity(this.activePiece, 0);
       this.effects.push({ type: 'rotate', x: this.activePiece.position.x, y: this.activePiece.position.y, t: 0, life: 0.22 });
     }
 
@@ -536,6 +576,10 @@
 
         if (flat) this.activeFlatKeys.add(key);
         if (stable) this.activeStableKeys.add(key);
+
+        // 空中方块第一次接触小车/堆叠体后，才从“俄罗斯方块格落模式”释放为真实物理刚体。
+        if (entA.type === 'piece' && entA.body.plugin.piece.inAir && (entB.type === 'cart' || entB.type === 'piece')) this.releasePiecePhysics(entA.body);
+        if (entB.type === 'piece' && entB.body.plugin.piece.inAir && (entA.type === 'cart' || entA.type === 'piece')) this.releasePiecePhysics(entB.body);
 
         // 标记已经接触到小车/堆叠体，方便计分和生成下一个方块。
         if (entA.type === 'piece' && (entB.type === 'cart' || entB.type === 'piece')) entA.body.plugin.piece.touchedStack = true;
@@ -958,67 +1002,81 @@
       return this.W / 2 + (x - this.W / 2) / this.cameraScale;
     }
 
-    drawPiece(ctx, body) {
-      const p = body.plugin.piece;
-      const visualParts = p.visualParts || (body.parts.length > 1 ? body.parts.slice(1) : [body]);
-      for (let i = 0; i < visualParts.length; i++) {
-        const part = visualParts[i];
-        const data = p.cellData[i] || { cracks: [] };
-        this.drawCell(ctx, part.position.x, part.position.y, part.angle || body.angle, p, data);
-      }
+    screenToWorldY(y) {
+      const anchorY = this.H - 190;
+      return this.cartY + (y - anchorY) / this.cameraScale;
     }
 
-    drawCell(ctx, wx, wy, angle, p, data) {
-      const pos = this.worldToScreen(wx, wy);
-      const s = this.cameraScale;
-      const size = this.CELL * 0.94;
+    worldOffsetToLocal(body, dx, dy) {
+      const a = -(body.angle || 0);
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      return {
+        x: dx * c - dy * s,
+        y: dx * s + dy * c
+      };
+    }
+
+    drawPiece(ctx, body) {
+      const p = body.plugin.piece;
+      const cells = p.visualCells || (p.visualParts || []).map((part) => this.worldOffsetToLocal(body, part.position.x - body.position.x, part.position.y - body.position.y));
+      const pos = this.worldToScreen(body.position.x, body.position.y);
       ctx.save();
       ctx.translate(pos.x, pos.y);
-      ctx.rotate(angle);
-      ctx.scale(s, s);
+      ctx.scale(this.cameraScale, this.cameraScale);
+      ctx.rotate(body.angle || 0);
+
+      for (let i = 0; i < cells.length; i++) {
+        const data = p.cellData[i] || { cracks: [] };
+        this.drawCellLocal(ctx, cells[i].x, cells[i].y, p, data);
+      }
+      this.drawPieceOuterBorder(ctx, p, cells);
+      ctx.restore();
+    }
+
+    drawCellLocal(ctx, lx, ly, p, data) {
+      const size = this.CELL * 1.035;
+      ctx.save();
+      ctx.translate(lx, ly);
 
       let fill = p.palette[0];
-      let edge = '#f7ffff';
-      let shadow = 'rgba(36, 67, 76, 0.24)';
+      let shadow = 'rgba(36, 67, 76, 0.18)';
       if (p.kind === 'quickFreeze') {
         fill = '#7ef4f3';
-        edge = '#f3ffff';
-        shadow = 'rgba(0, 220, 230, 0.35)';
+        shadow = 'rgba(0, 220, 230, 0.40)';
       } else if (p.kind === 'dirt') {
         fill = '#d7a63b';
-        edge = '#f6e39d';
-        shadow = 'rgba(80, 48, 12, 0.26)';
+        shadow = 'rgba(80, 48, 12, 0.22)';
       } else if (p.frozen) {
-        fill = this.mixColor(p.palette[0], '#c9fbff', 0.45);
-        edge = '#ffffff';
-        shadow = 'rgba(153, 244, 255, 0.42)';
+        fill = this.mixColor(p.palette[0], '#c9fbff', 0.55);
+        shadow = 'rgba(153, 244, 255, 0.50)';
       }
 
       ctx.shadowColor = shadow;
-      ctx.shadowBlur = p.frozen || p.kind === 'quickFreeze' ? 8 : 3;
+      ctx.shadowBlur = p.frozen || p.kind === 'quickFreeze' ? 10 : 2;
       ctx.fillStyle = fill;
-      ctx.strokeStyle = edge;
-      ctx.lineWidth = 3.2;
-      this.roundRect(ctx, -size / 2, -size / 2, size, size, 5, true, true);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = p.frozen ? 1.3 : 0.7;
+      this.roundRect(ctx, -size / 2, -size / 2, size, size, 4, true, true);
+      ctx.shadowBlur = 0;
 
-      // 冰块内部高光
+      // 非冻结方块的白框被刻意淡化；冻结后由整体外框统一加粗。
       if (p.kind !== 'dirt') {
-        ctx.globalAlpha = p.frozen ? 0.45 : 0.26;
+        ctx.globalAlpha = p.frozen ? 0.54 : 0.20;
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
         ctx.moveTo(-size * 0.32, -size * 0.38);
-        ctx.quadraticCurveTo(-size * 0.12, -size * 0.50, size * 0.20, -size * 0.36);
-        ctx.quadraticCurveTo(size * 0.03, -size * 0.28, -size * 0.32, -size * 0.23);
+        ctx.quadraticCurveTo(-size * 0.11, -size * 0.50, size * 0.22, -size * 0.35);
+        ctx.quadraticCurveTo(size * 0.03, -size * 0.27, -size * 0.32, -size * 0.22);
         ctx.closePath();
         ctx.fill();
         ctx.globalAlpha = 1;
       }
 
-      // 裂纹
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = p.kind === 'dirt' ? '#8b6225' : (p.frozen ? '#eaffff' : 'rgba(255,255,255,0.72)');
-      ctx.lineWidth = p.frozen ? 2.2 : 1.8;
+      ctx.strokeStyle = p.kind === 'dirt' ? '#8b6225' : (p.frozen ? '#efffff' : 'rgba(255,255,255,0.48)');
+      ctx.lineWidth = p.frozen ? 2.4 : 1.15;
       for (const line of data.cracks) {
         ctx.beginPath();
         ctx.moveTo(line[0] * size, line[1] * size);
@@ -1030,11 +1088,75 @@
         this.drawSnowBurst(ctx, 0, 0, size * 0.36);
       }
       if (p.frozen && p.kind !== 'dirt') {
-        ctx.globalAlpha = 0.35;
-        ctx.strokeStyle = '#dfffff';
-        ctx.lineWidth = 4;
-        this.roundRect(ctx, -size / 2 + 2, -size / 2 + 2, size - 4, size - 4, 5, false, true);
+        ctx.globalAlpha = 0.36;
+        ctx.strokeStyle = '#bff8ff';
+        ctx.lineWidth = 3.2;
+        ctx.beginPath();
+        ctx.moveTo(-size * 0.43, -size * 0.08);
+        ctx.lineTo(size * 0.43, -size * 0.08);
+        ctx.moveTo(-size * 0.16, -size * 0.43);
+        ctx.lineTo(-size * 0.16, size * 0.43);
+        ctx.stroke();
         ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+    }
+
+    drawPieceOuterBorder(ctx, p, cells) {
+      if (!cells || !cells.length) return;
+      const shapeCells = p.shapeCells || cells.map((_, i) => [i, 0]);
+      const has = new Set(shapeCells.map((c) => `${c[0]},${c[1]}`));
+      const half = this.CELL * 0.515;
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      if (p.kind === 'dirt') {
+        ctx.strokeStyle = '#f5df8e';
+        ctx.lineWidth = 2.8;
+      } else if (p.frozen || p.kind === 'quickFreeze') {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 5.2;
+        ctx.shadowColor = 'rgba(202, 255, 255, 0.72)';
+        ctx.shadowBlur = 8;
+      } else {
+        ctx.strokeStyle = 'rgba(255,255,255,0.46)';
+        ctx.lineWidth = 1.6;
+      }
+
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        const g = shapeCells[i] || [i, 0];
+        const gx = g[0];
+        const gy = g[1];
+        const x0 = c.x - half;
+        const x1 = c.x + half;
+        const y0 = c.y - half;
+        const y1 = c.y + half;
+        if (!has.has(`${gx},${gy - 1}`)) {
+          ctx.beginPath(); ctx.moveTo(x0 + 3, y0); ctx.lineTo(x1 - 3, y0); ctx.stroke();
+        }
+        if (!has.has(`${gx},${gy + 1}`)) {
+          ctx.beginPath(); ctx.moveTo(x0 + 3, y1); ctx.lineTo(x1 - 3, y1); ctx.stroke();
+        }
+        if (!has.has(`${gx - 1},${gy}`)) {
+          ctx.beginPath(); ctx.moveTo(x0, y0 + 3); ctx.lineTo(x0, y1 - 3); ctx.stroke();
+        }
+        if (!has.has(`${gx + 1},${gy}`)) {
+          ctx.beginPath(); ctx.moveTo(x1, y0 + 3); ctx.lineTo(x1, y1 - 3); ctx.stroke();
+        }
+      }
+
+      if (p.frozen && p.kind !== 'dirt') {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#bdf9ff';
+        ctx.lineWidth = 2.1;
+        for (let i = 0; i < cells.length; i++) {
+          const c = cells[i];
+          ctx.beginPath();
+          ctx.moveTo(c.x - half * 0.62, c.y + half * 0.46);
+          ctx.lineTo(c.x + half * 0.46, c.y - half * 0.62);
+          ctx.stroke();
+        }
       }
       ctx.restore();
     }
