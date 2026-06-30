@@ -38,6 +38,7 @@
       this.Events = this.M.Events;
       this.Vector = this.M.Vector;
       this.Query = this.M.Query;
+      this.Sleeping = this.M.Sleeping;
 
       this.canvas = document.getElementById('game');
       this.ctx = this.canvas.getContext('2d');
@@ -45,7 +46,7 @@
 
       // ====== 核心参数区：试玩后最容易调的都集中在这里 ======
       this.CELL = 30;                 // 一个小格的物理尺寸
-      this.FREEZE_TIME = 16;          // 平滑稳定接触 16 秒后冻结
+      this.FREEZE_TIME = 14;          // 平滑稳定接触 14 秒后冻结
       this.MISS_LIMIT = 2;            // 掉出 2 个“大方块”后结束
       this.SPAWN_DELAY = 760;         // 一个方块落定后，下一个生成的延迟
       this.CART_WIDTH_RATIO = 0.60;   // 小车宽度占屏幕比例，略微收窄以扩大横向操作空间
@@ -54,10 +55,10 @@
       this.CART_WALL_H = 92;
       this.CART_EDGE_OVERHANG = this.CELL * 1.18; // 允许小车边缘略微移出屏幕，边缘方块更容易接到
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 1600;     // 只用于限制极端拖动输入，px/s
+      this.CART_MAX_SPEED = 1320;     // 小车真实最大移动速度，px/s；防止高速拖动造成卡死/穿模
       this.GRAVITY = 0.86;
-      this.AIR_FALL_SPEED = 62;       // 空中阶段匀速下降，比上一版快约 10%，px/s
-      this.FAST_AIR_FALL_SPEED = 473; // 按住“下落”时的匀速快落，同步快约 10%，px/s
+      this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
+      this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
       this.MIN_CAMERA_SCALE = 0.36;
       this.MAX_CAMERA_SCALE = 0.92;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
@@ -186,10 +187,20 @@
       this.cartY = this.H - Math.max(178, Math.min(220, this.H * 0.22));
       this.cartW = this.clamp(this.W * this.CART_WIDTH_RATIO, this.CART_MIN_WIDTH, Math.min(this.CART_MAX_WIDTH, this.W - 70));
       if (!this.cartX) this.cartX = this.W / 2;
-      const overhang = this.CART_EDGE_OVERHANG || 0;
-      this.cartX = this.clamp(this.cartX, this.cartW / 2 - overhang, this.W - this.cartW / 2 + overhang);
-      this.cartTargetX = this.clamp(this.cartTargetX || this.cartX, this.cartW / 2 - overhang, this.W - this.cartW / 2 + overhang);
+      const bounds = this.getCartMoveBounds();
+      this.cartX = this.clamp(this.cartX, bounds.minX, bounds.maxX);
+      this.cartTargetX = this.clamp(this.cartTargetX || this.cartX, bounds.minX, bounds.maxX);
       if (this.cartBodies.length) this.placeCartBodies(this.cartX, this.cartY, 0);
+    }
+
+    getCartMoveBounds() {
+      const overhang = this.CART_EDGE_OVERHANG || 0;
+      const visibleLeft = this.screenToWorldX(0);
+      const visibleRight = this.screenToWorldX(this.W);
+      return {
+        minX: visibleLeft + this.cartW / 2 - overhang,
+        maxX: visibleRight - this.cartW / 2 + overhang
+      };
     }
 
     bindInput() {
@@ -298,12 +309,15 @@
       if (!floor) return;
       const shelfW = this.CELL * 1.08;
       const shelfH = 12;
-      this.Body.setPosition(floor, { x, y });
-      this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 });
-      this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 });
-      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
-      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
-      this.cartBodies.forEach((b) => this.Body.setVelocity(b, { x: matterVX, y: 0 }));
+      this.Body.setPosition(floor, { x, y }, true);
+      this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 }, true);
+      this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 }, true);
+      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, true);
+      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 }, true);
+      this.cartBodies.forEach((b) => {
+        this.Body.setVelocity(b, { x: matterVX, y: 0 });
+        if (this.Sleeping) this.Sleeping.set(b, false);
+      });
     }
 
     bindPhysicsEvents() {
@@ -315,11 +329,36 @@
       this.nextSpawnAt = this.currentTime + delayMs / 1000;
     }
 
+    getSpawnRange(def) {
+      // 生成范围按“当前可视世界宽度”的比例计算。
+      // 初始视角时更靠中间，避免贴边生成；冰塔越高、镜头越远，生成范围会随可视世界平滑变宽。
+      const zoomT = this.clamp((this.cameraScale - this.MIN_CAMERA_SCALE) / Math.max(0.001, this.MAX_CAMERA_SCALE - this.MIN_CAMERA_SCALE), 0, 1);
+      const sideRatio = 0.13 + 0.09 * zoomT; // zoomT=1: 两侧各留 22%；zoomT=0: 两侧各留 13%
+      const leftScreen = this.W * sideRatio;
+      const rightScreen = this.W * (1 - sideRatio);
+      let left = this.screenToWorldX(leftScreen);
+      let right = this.screenToWorldX(rightScreen);
+
+      // 按形状自身宽度继续缩一点，避免长条刚生成就贴住边缘。
+      const cells = def && def.cells ? def.cells : [[0, 0]];
+      const minCx = Math.min(...cells.map((c) => c[0]));
+      const maxCx = Math.max(...cells.map((c) => c[0]));
+      const halfShapeW = Math.max(this.CELL * 0.75, (maxCx - minCx + 1) * this.CELL * 0.42);
+      left += halfShapeW;
+      right -= halfShapeW;
+
+      if (right <= left) {
+        left = this.W * 0.38;
+        right = this.W * 0.62;
+      }
+      return { left, right };
+    }
+
     spawnPiece() {
       if (this.gameOver) return;
       const def = this.weightedChoice(this.shapes);
-      const margin = this.CELL * 2.2;
-      const spawnX = this.random(margin, this.W - margin);
+      const spawnRange = this.getSpawnRange(def);
+      const spawnX = this.random(spawnRange.left, spawnRange.right);
       const spawnY = this.screenToWorldY(82);
       const angle = Math.floor(this.random(0, 4)) * Math.PI / 2;
       const id = 'p' + Math.floor(Math.random() * 1e9).toString(36) + '_' + Date.now().toString(36);
@@ -445,20 +484,55 @@
     }
 
     updateCart(dt) {
-      const overhang = this.CART_EDGE_OVERHANG || 0;
-      const minX = this.cartW / 2 - overhang;
-      const maxX = this.W - this.cartW / 2 + overhang;
+      const bounds = this.getCartMoveBounds();
+      const minX = bounds.minX;
+      const maxX = bounds.maxX;
       this.cartTargetX = this.clamp(this.cartTargetX, minX, maxX);
       const oldX = this.cartX;
 
-      // 新手感：小车实时跟随手指，不再用弹簧慢慢追。
-      // 但仍把本帧位移换算成物理速度，车内方块会受到急停、急拉带来的惯性影响。
-      this.cartX = this.cartTargetX;
-      this.cartX = this.clamp(this.cartX, minX, maxX);
+      // 仍保持“跟手”的感觉，但给真实小车设置最大速度。
+      // 这样可以避免手指瞬间跨屏时，静态小车从方块里穿过去，导致方块卡在原地或被挤出小车。
+      const desiredDelta = this.cartTargetX - oldX;
+      const maxStep = Math.max(1, this.CART_MAX_SPEED * dt);
+      const step = this.clamp(desiredDelta, -maxStep, maxStep);
+      this.cartX = this.clamp(oldX + step, minX, maxX);
+
       const dx = this.cartX - oldX;
-      this.cartVX = dt > 0 ? this.clamp(dx / dt, -this.CART_MAX_SPEED, this.CART_MAX_SPEED) : 0;
-      this.cartMatterVX = dt > 0 ? this.clamp(dx / (dt * 60), -26, 26) : 0;
+      this.cartVX = dt > 0 ? dx / dt : 0;
+      this.cartMatterVX = dt > 0 ? this.clamp(dx / (dt * 60), -22, 22) : 0;
       this.placeCartBodies(this.cartX, this.cartY, this.cartMatterVX);
+      if (Math.abs(dx) > 0.01) this.carryLoosePiecesWithCart(dx, dt);
+    }
+
+    carryLoosePiecesWithCart(dx, dt) {
+      // Matter.js 对“被手动移动的静态车体 + 已休眠方块”的摩擦传递不够稳定。
+      // 这里给车内/车边的未冻结方块补一个温和的随车水平速度，并唤醒休眠体，避免看起来卡在原地。
+      const cartLeft = this.cartX - this.cartW / 2 - this.CELL * 1.2;
+      const cartRight = this.cartX + this.cartW / 2 + this.CELL * 1.2;
+      const zoneTop = this.cartY - this.CART_WALL_H - this.CELL * 2.2;
+      const zoneBottom = this.cartY + this.CELL * 2.2;
+      const targetVX = this.cartMatterVX;
+
+      for (const body of this.pieces.values()) {
+        const p = body.plugin && body.plugin.piece;
+        if (!p || p.missed || p.inAir) continue;
+        if (p.cartLocked) {
+          if (this.Sleeping) this.Sleeping.set(body, false);
+          continue;
+        }
+
+        const b = body.bounds;
+        const nearCart = b.max.x > cartLeft && b.min.x < cartRight && b.max.y > zoneTop && b.min.y < zoneBottom;
+        if (!nearCart) continue;
+
+        if (this.Sleeping) this.Sleeping.set(body, false);
+        const factor = this.clamp(0.18 + Math.abs(targetVX) / 80, 0.18, 0.45);
+        this.Body.setVelocity(body, {
+          x: body.velocity.x + (targetVX - body.velocity.x) * factor,
+          y: body.velocity.y
+        });
+        this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.94);
+      }
     }
 
     updateActiveKinematicPiece(dt) {
@@ -522,6 +596,7 @@
       p.airTargetY = body.position.y;
       p.touchedStack = true;
       this.Body.setStatic(body, false);
+      if (this.Sleeping) this.Sleeping.set(body, false);
       const releaseY = Math.max(0.72, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 78);
       this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
@@ -532,11 +607,13 @@
       for (const body of this.pieces.values()) {
         const p = body.plugin.piece;
         if (!p || !p.cartLocked || !p.lockRel || p.missed) continue;
+        if (this.Sleeping) this.Sleeping.set(body, false);
+        if (!body.isStatic) this.Body.setStatic(body, true);
         this.Body.setPosition(body, {
           x: this.cartX + p.lockRel.x,
           y: this.cartY + p.lockRel.y
-        });
-        this.Body.setAngle(body, p.lockRel.angle);
+        }, true);
+        this.Body.setAngle(body, p.lockRel.angle, true);
         this.Body.setVelocity(body, { x: this.cartMatterVX, y: 0 });
         this.Body.setAngularVelocity(body, 0);
       }
@@ -552,7 +629,9 @@
         if (body.bounds.min.y < currentTop) currentTop = body.bounds.min.y;
 
         const belowCart = body.bounds.min.y > this.cartY + 120;
-        const farSide = body.position.x < -this.CELL * 2 || body.position.x > this.W + this.CELL * 2;
+        const visibleLeft = this.screenToWorldX(-this.CELL * 3);
+        const visibleRight = this.screenToWorldX(this.W + this.CELL * 3);
+        const farSide = body.position.x < visibleLeft || body.position.x > visibleRight;
         const droppedTooLow = body.position.y > this.cartY + 180;
         if (belowCart || farSide || droppedTooLow) {
           this.markMissed(body);
@@ -604,7 +683,7 @@
       const desiredWorldHeight = Math.max(360, this.cartY - top + 210);
       const available = Math.max(330, this.H - 200);
       this.targetCameraScale = this.clamp(available / desiredWorldHeight, this.MIN_CAMERA_SCALE, this.MAX_CAMERA_SCALE);
-      const smooth = 1 - Math.pow(0.06, dt);
+      const smooth = 1 - Math.pow(0.10, dt); // 平滑缩放动画，堆高后视野拓宽不会突然跳变
       this.cameraScale += (this.targetCameraScale - this.cameraScale) * smooth;
     }
 
@@ -856,11 +935,17 @@
         if (body && body.plugin && body.plugin.piece) {
           const p = body.plugin.piece;
           p.cartLocked = true;
+          p.inAir = false;
+          p.touchedStack = true;
           p.lockRel = {
             x: body.position.x - this.cartX,
             y: body.position.y - this.cartY,
             angle: body.angle
           };
+          if (this.Sleeping) this.Sleeping.set(body, false);
+          this.Body.setVelocity(body, { x: 0, y: 0 });
+          this.Body.setAngularVelocity(body, 0);
+          this.Body.setStatic(body, true);
           this.setFrozen(body);
         }
         const nb = this.bondGraph.get(id);
