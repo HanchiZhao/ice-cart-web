@@ -1,6 +1,6 @@
 /*
   叠冰塔 Ice Cart - 单文件核心逻辑
-  玩法：移动小车接住随机下落的俄罗斯方块形冰块；方块只能旋转，不能左右移动；空中按俄罗斯方块节奏一格一格下落。
+  玩法：移动小车接住随机下落的俄罗斯方块形冰块；方块只能旋转，不能左右移动；空中按俄罗斯方块节奏匀速下落。
   计分：按小格计数。失败：按“大方块/整件方块”计数，掉出小车外达到 2 件则游戏结束。
 */
 
@@ -37,6 +37,7 @@
       this.Constraint = this.M.Constraint;
       this.Events = this.M.Events;
       this.Vector = this.M.Vector;
+      this.Query = this.M.Query;
 
       this.canvas = document.getElementById('game');
       this.ctx = this.canvas.getContext('2d');
@@ -54,9 +55,8 @@
       this.CART_FLOOR_H = 16;
       this.CART_MAX_SPEED = 1600;     // 只用于限制极端拖动输入，px/s
       this.GRAVITY = 0.86;
-      this.GRID_FALL_INTERVAL = 0.58; // 普通下落：约每 0.58 秒下降一格
-      this.FAST_GRID_INTERVAL = 0.075;// 按住“下落”：快速一格一格下降
-      this.GRID_STEP_SMOOTH = 14;     // 格落动画平滑度；越大越贴近目标格
+      this.AIR_FALL_SPEED = 56;       // 空中阶段匀速下降，接近俄罗斯方块慢落手感，px/s
+      this.FAST_AIR_FALL_SPEED = 430; // 按住“下落”时的匀速快落，px/s
       this.MIN_CAMERA_SCALE = 0.36;
       this.MAX_CAMERA_SCALE = 1.0;
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
@@ -248,6 +248,8 @@
     createCart() {
       this.cartBodies.forEach((b) => this.World.remove(this.world, b));
       this.cartBodies = [];
+      // 小车物理模型：底部木板 + 左右挡板 + 两侧挡板顶部的一格小平台。
+      // 所有部位都参与碰撞，也都被视为“开局已冻结”的冰块结构。
       const floor = this.Bodies.rectangle(this.cartX, this.cartY, this.cartW, this.CART_FLOOR_H, {
         isStatic: true,
         friction: 1.0,
@@ -266,8 +268,23 @@
         restitution: 0.02,
         label: 'cart_right'
       });
-      [floor, left, right].forEach((b) => {
+      const shelfW = this.CELL * 1.08;
+      const shelfH = 10;
+      const leftShelf = this.Bodies.rectangle(this.cartX - this.cartW / 2 + 8 + shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
+        isStatic: true,
+        friction: 1.0,
+        restitution: 0.02,
+        label: 'cart_left_top_platform'
+      });
+      const rightShelf = this.Bodies.rectangle(this.cartX + this.cartW / 2 - 8 - shelfW / 2, this.cartY - this.CART_WALL_H - shelfH / 2, shelfW, shelfH, {
+        isStatic: true,
+        friction: 1.0,
+        restitution: 0.02,
+        label: 'cart_right_top_platform'
+      });
+      [floor, left, right, leftShelf, rightShelf].forEach((b) => {
         b.plugin.isCart = true;
+        b.plugin.cartFrozen = true;
         this.cartBodies.push(b);
       });
       this.World.add(this.world, this.cartBodies);
@@ -275,11 +292,15 @@
     }
 
     placeCartBodies(x, y, matterVX) {
-      const [floor, left, right] = this.cartBodies;
+      const [floor, left, right, leftShelf, rightShelf] = this.cartBodies;
       if (!floor) return;
+      const shelfW = this.CELL * 1.08;
+      const shelfH = 10;
       this.Body.setPosition(floor, { x, y });
       this.Body.setPosition(left, { x: x - this.cartW / 2 + 8, y: y - this.CART_WALL_H / 2 });
       this.Body.setPosition(right, { x: x + this.cartW / 2 - 8, y: y - this.CART_WALL_H / 2 });
+      if (leftShelf) this.Body.setPosition(leftShelf, { x: x - this.cartW / 2 + 8 + shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
+      if (rightShelf) this.Body.setPosition(rightShelf, { x: x + this.cartW / 2 - 8 - shelfW / 2, y: y - this.CART_WALL_H - shelfH / 2 });
       this.cartBodies.forEach((b) => this.Body.setVelocity(b, { x: matterVX, y: 0 }));
     }
 
@@ -439,18 +460,46 @@
       const p = body.plugin.piece;
       if (!p || !p.inAir || p.missed || p.cartLocked) return;
 
-      const interval = this.dropHeld ? this.FAST_GRID_INTERVAL : this.GRID_FALL_INTERVAL;
-      p.dropTimer += dt;
-      while (p.dropTimer >= interval) {
-        p.dropTimer -= interval;
-        p.airTargetY += this.CELL;
+      const speed = this.dropHeld ? this.FAST_AIR_FALL_SPEED : this.AIR_FALL_SPEED;
+      const nextY = body.position.y + speed * dt;
+      p.airTargetY = nextY;
+      p.lastAirSpeed = speed;
+      this.Body.setPosition(body, { x: body.position.x, y: nextY });
+      this.Body.setVelocity(body, { x: 0, y: speed / 60 });
+      this.Body.setAngularVelocity(body, 0);
+
+      // Matter.js 不会为两个 static 物体做真实接触解析。
+      // 空中方块为了避免自由落体和自旋，必须保持 static；因此这里手动检测它是否已经碰到小车或堆叠方块。
+      // 一旦接触任意小车建模部位或任意已有方块，立即切换为真实物理刚体。
+      if (this.kinematicTouchesStack(body)) {
+        this.releasePiecePhysics(body);
+      }
+    }
+
+    kinematicTouchesStack(body) {
+      const p = body && body.plugin ? body.plugin.piece : null;
+      if (!p || !p.inAir || p.missed) return false;
+
+      const activeParts = body.parts && body.parts.length > 1 ? body.parts.slice(1) : [body];
+      const targets = [];
+
+      for (const cartPart of this.cartBodies) {
+        if (cartPart) targets.push(cartPart);
       }
 
-      const smooth = 1 - Math.pow(0.0008, dt * this.GRID_STEP_SMOOTH);
-      const nextY = body.position.y + (p.airTargetY - body.position.y) * smooth;
-      this.Body.setPosition(body, { x: body.position.x, y: nextY });
-      this.Body.setVelocity(body, { x: 0, y: 0 });
-      this.Body.setAngularVelocity(body, 0);
+      for (const other of this.pieces.values()) {
+        if (!other || other === body) continue;
+        const op = other.plugin && other.plugin.piece;
+        if (!op || op.missed) continue;
+        if (other.parts && other.parts.length > 1) targets.push(...other.parts.slice(1));
+        else targets.push(other);
+      }
+
+      if (!targets.length) return false;
+      for (const part of activeParts) {
+        if (this.Query.collides(part, targets).length > 0) return true;
+      }
+      return false;
     }
 
     releasePiecePhysics(body) {
@@ -459,8 +508,10 @@
       p.inAir = false;
       p.releasedAt = this.currentTime;
       p.airTargetY = body.position.y;
+      p.touchedStack = true;
       this.Body.setStatic(body, false);
-      this.Body.setVelocity(body, { x: 0, y: 0.35 });
+      const releaseY = Math.max(1.0, (p.lastAirSpeed || this.AIR_FALL_SPEED) / 60);
+      this.Body.setVelocity(body, { x: 0, y: releaseY });
       this.Body.setAngularVelocity(body, 0);
       this.effects.push({ type: 'land', x: body.position.x, y: body.position.y, t: 0, life: 0.28 });
     }
@@ -655,6 +706,7 @@
     }
 
     canNormalFreeze(entA, entB) {
+      // 小车被视为开局已冻结的结构：任意小车部位与普通/急冻冰块平滑稳定接触 16 秒后，冰块冻结并粘到小车。
       if (entA.type === 'cart' && entB.type === 'piece') return entB.body.plugin.piece.kind !== 'dirt';
       if (entB.type === 'cart' && entA.type === 'piece') return entA.body.plugin.piece.kind !== 'dirt';
       if (entA.type === 'piece' && entB.type === 'piece') {
@@ -1204,11 +1256,25 @@
       ctx.moveTo(this.cartW / 2 - 10, -10);
       ctx.lineTo(this.cartW / 2 - 10, -this.CART_WALL_H - 2);
       ctx.stroke();
+      // 挡板顶部的一格小平台：和物理碰撞箱一致，方块碰到这里也会落下并参与冻结计时。
+      const shelfW = this.CELL * 1.08;
+      const shelfH = 10;
+      ctx.fillStyle = '#56392b';
+      ctx.strokeStyle = '#241c19';
+      ctx.lineWidth = 4;
+      this.roundRect(ctx, -this.cartW / 2 + 8, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
+      this.roundRect(ctx, this.cartW / 2 - 8 - shelfW, -this.CART_WALL_H - shelfH, shelfW, shelfH, 4, true, true);
+      ctx.fillStyle = '#f6ffff';
+      ctx.globalAlpha = 0.92;
+      this.roundRect(ctx, -this.cartW / 2 + 8, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
+      this.roundRect(ctx, this.cartW / 2 - 8 - shelfW, -this.CART_WALL_H - shelfH - 4, shelfW, 5, 3, true, false);
+      ctx.globalAlpha = 1;
+
       ctx.fillStyle = '#72f3ef';
       ctx.strokeStyle = '#f5ffff';
       ctx.lineWidth = 3;
-      this.drawStar(ctx, -this.cartW / 2 + 10, -this.CART_WALL_H - 12, 14, 8);
-      this.drawStar(ctx, this.cartW / 2 - 10, -this.CART_WALL_H - 12, 14, 8);
+      this.drawStar(ctx, -this.cartW / 2 + 10, -this.CART_WALL_H - 18, 14, 8);
+      this.drawStar(ctx, this.cartW / 2 - 10, -this.CART_WALL_H - 18, 14, 8);
 
       // 积雪边
       ctx.fillStyle = '#f6ffff';
