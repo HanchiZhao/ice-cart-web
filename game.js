@@ -46,7 +46,7 @@
 
       // ====== 核心参数区：试玩后最容易调的都集中在这里 ======
       this.CELL = 30;                 // 一个小格的物理尺寸
-      this.FREEZE_TIME = 14;          // 平滑稳定接触 14 秒后冻结
+      this.FREEZE_TIME = 16;          // 平滑稳定接触 16 秒后冻结
       this.MISS_LIMIT = 2;            // 掉出 2 个“大方块”后结束
       this.SPAWN_DELAY = 760;         // 一个方块落定后，下一个生成的延迟
       this.CART_WIDTH_RATIO = 0.60;   // 小车宽度占屏幕比例
@@ -56,10 +56,10 @@
       this.CART_WALL_H = 92;
       this.CART_EDGE_OVERHANG = this.CELL * 1.75; // 允许小车边缘适度移出屏幕，保证更大的接块与摆放范围
       this.CART_FLOOR_H = 16;
-      this.CART_MAX_SPEED = 620;      // 小车真实最大移动速度，px/s；继续限制高速拖车导致的嵌入/挤飞风险
+      this.CART_MAX_SPEED = 560;      // 小车真实最大移动速度，px/s；进一步降低，减少慢速/中速拖动时的嵌入和滑动
       this.GRAVITY = 0.68;
-      this.AIR_FALL_SPEED = 81;       // 空中阶段匀速下降，比上一版再快约 30%，px/s
-      this.FAST_AIR_FALL_SPEED = 615; // 按住“下落”时的匀速快落，同步再快约 30%，px/s
+      this.AIR_FALL_SPEED = 97;       // 空中阶段匀速下降，在上一版基础上再快约 20%，px/s
+      this.FAST_AIR_FALL_SPEED = 738; // 按住“下落”时的匀速快落，同步再快约 20%，px/s
       this.MIN_CAMERA_SCALE = 0.30;
       this.MAX_CAMERA_SCALE = 0.74; // 初始/最大视角更开阔，保证边缘方块也能被小车接到任意位置
       this.FLAT_OVERLAP = 0.52;       // 平滑接触需要的切向重叠比例
@@ -98,13 +98,15 @@
       this.loadedCells = 0;
       this.missedPieces = 0;
       this.gameOver = false;
-      this.gameStarted = true;
+      this.gameStarted = false;
+      this.guideLineEnabled = true;
 
       this.cameraScale = 0.74;
       this.targetCameraScale = 0.74;
       this.activeFlatKeys = new Set();
       this.activeStableKeys = new Set();
       this.contactTimers = new Map();
+      this.specialContactTimers = new Map(); // 急冻/熔岩必须经过短暂稳定判定，避免把本该掉落的方块定住
       this.bonds = [];
       this.bondKeys = new Set();
       this.bondGraph = new Map();
@@ -124,7 +126,7 @@
       this.bindInput();
       this.createCart();
       this.bindPhysicsEvents();
-      this.scheduleSpawn(100);
+      // 先进入开始界面，点击开始后再生成第一个方块。
       requestAnimationFrame((ts) => this.loop(ts));
     }
 
@@ -174,6 +176,11 @@
           id: 'DIRT_O4', name: '土方块', kind: 'dirt', weight: 1.0,
           cells: [[0, 0], [1, 0], [0, 1], [1, 1]],
           palette: ['#e4bf4d', '#c99a25', '#f6dd7a']
+        },
+        {
+          id: 'LAVA1', name: '熔岩', kind: 'lava', weight: 1.0,
+          cells: [[0, 0]],
+          palette: ['#ff714a', '#d93928', '#ffd089']
         }
       ];
     }
@@ -193,18 +200,28 @@
       const normals = this.shapes.filter((shape) => shape.kind === 'ice');
       const qf = this.getShapeByKind('quickFreeze');
       const dirt = this.getShapeByKind('dirt');
+      const lava = this.getShapeByKind('lava');
 
-      // 前 5 个：固定出现 2 个急冻，其余只从普通冰块中随机；不出现土方块。
+      // 前 5 个：固定出现 2 个急冻，其余只从普通冰块中随机；不出现土方块/熔岩。
       if (this.spawnCount < 5) {
         if (qf && this.firstFiveQuickFreezeSlots.has(this.spawnCount)) return qf;
         return this.weightedChoice(normals);
       }
 
-      // 第 6 个到第 20 个：急冻概率 10%，不出现土方块。
-      // 第 21 个开始：急冻 10%，土方块 10%，其余普通冰块。
+      // 第 6 个开始：急冻约 10%。第 21 个开始：土方块约 10%。第 31 个开始：熔岩约 10%。
       const r = Math.random();
+      if (this.spawnCount >= 30) {
+        if (lava && r < 0.10) return lava;
+        if (dirt && r < 0.20) return dirt;
+        if (qf && r < 0.30) return qf;
+        return this.weightedChoice(normals);
+      }
+      if (this.spawnCount >= 20) {
+        if (dirt && r < 0.10) return dirt;
+        if (qf && r < 0.20) return qf;
+        return this.weightedChoice(normals);
+      }
       if (qf && r < 0.10) return qf;
-      if (this.spawnCount >= 20 && dirt && r < 0.20) return dirt;
       return this.weightedChoice(normals);
     }
 
@@ -251,6 +268,20 @@
         const p = getPoint(ev);
         this.pointerDown = true;
         this.lastPointer = p;
+
+        if (!this.gameStarted) {
+          const start = this.getStartButton();
+          const toggle = this.getGuideToggleRect();
+          if (this.pointInRect(p, toggle)) {
+            this.guideLineEnabled = !this.guideLineEnabled;
+            return;
+          }
+          if (this.pointInRect(p, start)) {
+            this.startGame();
+            return;
+          }
+          return;
+        }
 
         if (this.gameOver) {
           const b = this.getRestartButton();
@@ -421,7 +452,7 @@
           restitution: 0.0,
           slop: 0.045,
           sleepThreshold: 34,
-          density: def.kind === 'dirt' ? 0.0046 : 0.0028,
+          density: def.kind === 'dirt' ? 0.0046 : (def.kind === 'lava' ? 0.0034 : 0.0028),
           label: 'piece_part'
         });
         parts.push(part);
@@ -439,7 +470,7 @@
           restitution: 0.0,
           slop: 0.045,
           sleepThreshold: 34,
-          density: def.kind === 'dirt' ? 0.0046 : 0.0028,
+          density: def.kind === 'dirt' ? 0.0046 : (def.kind === 'lava' ? 0.0034 : 0.0028),
           label: 'piece'
         });
       }
@@ -462,6 +493,7 @@
         cellCount: def.cells.length,
         palette: def.palette,
         frozen: false,
+        noFreeze: false,
         touchedStack: false,
         missed: false,
         settled: false,
@@ -498,7 +530,9 @@
       this.latestDT = dt;
       this.currentTime += dt;
 
-      if (!this.gameOver) {
+      if (!this.gameStarted) {
+        this.updateEffects(dt);
+      } else if (!this.gameOver) {
         this.updateCart(dt);
         this.updateLockedBodies();
 
@@ -520,6 +554,7 @@
         this.antiPopStabilizer(dt);
         this.updateLockedBodies();
         this.cleanupContactTimers();
+        this.cleanupSpecialContactTimers();
         this.updatePieceStates(dt);
         this.updateCamera(dt);
         this.updateEffects(dt);
@@ -553,14 +588,23 @@
     }
 
     carryLoosePiecesWithCart(dx, dt) {
-      // 禁止“弹性”体验的关键改动：小车是手动移动的静态结构，如果仅靠物理引擎处理，
-      // 高速拖动时车体可能瞬间嵌入方块，求解器会用很大的分离冲量把方块挤飞。
-      // 因此这里不再给方块灌入高速水平速度，而是把车内/车边低速方块按小车位移温和搬运，
-      // 并强力削减异常速度，让整体像高摩擦木车上的冰砖，而不是弹簧板。
-      const cartLeft = this.cartX - this.cartW / 2 - this.CELL * 1.45;
-      const cartRight = this.cartX + this.cartW / 2 + this.CELL * 1.45;
-      const zoneTop = this.cartY - this.CART_WALL_H - this.CELL * 3.2;
-      const zoneBottom = this.cartY + this.CELL * 2.3;
+      // 小车被手动移动时，不能完全依赖“静态碰撞体推方块”，否则物理求解器会在嵌入时产生弹飞/滑动。
+      // 这里把“慢速小心移动”的情况单独处理：只要方块属于车上堆叠区，就随车整体平移，速度清零。
+      // 快速拖动时才保留部分惯性风险。
+      const cartLeft = this.cartX - this.cartW / 2 - this.CELL * 2.0;
+      const cartRight = this.cartX + this.cartW / 2 + this.CELL * 2.0;
+      const zoneBottom = this.cartY + this.CELL * 2.4;
+      let towerTop = this.cartY - this.CART_WALL_H - this.CELL * 3.0;
+      for (const b of this.pieces.values()) {
+        const bp = b.plugin && b.plugin.piece;
+        if (bp && !bp.missed && !bp.inAir && b.bounds.max.x > cartLeft && b.bounds.min.x < cartRight) {
+          towerTop = Math.min(towerTop, b.bounds.min.y - this.CELL * 1.4);
+        }
+      }
+      const zoneTop = Math.max(this.screenToWorldY(-this.CELL * 2), towerTop);
+      const cartSpeed = Math.abs(this.cartVX || 0);
+      const slowCareful = cartSpeed < 240;
+      const mediumCareful = cartSpeed < 390;
       const absDx = Math.abs(dx);
 
       for (const body of this.pieces.values()) {
@@ -572,35 +616,30 @@
         }
 
         const b = body.bounds;
-        const nearCart = b.max.x > cartLeft && b.min.x < cartRight && b.max.y > zoneTop && b.min.y < zoneBottom;
-        if (!nearCart) continue;
-
+        const nearCartTower = b.max.x > cartLeft && b.min.x < cartRight && b.max.y > zoneTop && b.min.y < zoneBottom;
+        if (!nearCartTower) continue;
         if (this.Sleeping) this.Sleeping.set(body, false);
 
-        const bottomNearFloor = b.max.y > this.cartY - this.CELL * 2.3 && b.min.y < this.cartY + this.CELL * 1.8;
-        const overCartDeck = b.max.x > this.cartX - this.cartW / 2 - this.CELL * 0.8 && b.min.x < this.cartX + this.cartW / 2 + this.CELL * 0.8;
-        const cartSpeed = Math.abs(this.cartVX || 0);
+        const overCartDeck = b.max.x > this.cartX - this.cartW / 2 - this.CELL * 1.15 && b.min.x < this.cartX + this.cartW / 2 + this.CELL * 1.15;
+        const inStackHeight = b.max.y > zoneTop && b.min.y < zoneBottom;
+        const supportedOrInPile = this.hasDownwardSupport(body) || inStackHeight;
 
-        // 慢速小心移动时，车上方块应该像真实高摩擦接触一样稳定随车走，不应出现可感知滑动/抖动。
-        // 只有快速拖车时才逐渐保留惯性风险。
-        let carryFactor;
-        if (bottomNearFloor && overCartDeck && cartSpeed < 185) carryFactor = 1.0;
-        else if (bottomNearFloor && overCartDeck && cartSpeed < 360) carryFactor = 0.96;
-        else carryFactor = bottomNearFloor && overCartDeck ? 0.82 : 0.48;
-        this.Body.translate(body, { x: dx * carryFactor, y: 0 });
-
-        if (bottomNearFloor && overCartDeck && cartSpeed < 185) {
-          this.Body.setVelocity(body, { x: 0, y: this.clamp(body.velocity.y * 0.72, -0.18, 3.2) });
-          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.40);
+        if (slowCareful && overCartDeck && supportedOrInPile) {
+          // 慢速移动：模拟“高静摩擦”，整堆跟车走，不允许可见滑动。
+          this.Body.translate(body, { x: dx, y: 0 });
+          this.Body.setVelocity(body, { x: 0, y: Math.max(0, Math.min(body.velocity.y || 0, 1.6)) });
+          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.22);
+        } else if (mediumCareful && overCartDeck && supportedOrInPile) {
+          this.Body.translate(body, { x: dx * 0.94, y: 0 });
+          this.Body.setVelocity(body, { x: this.clamp((body.velocity.x || 0) * 0.30, -0.75, 0.75), y: Math.max(0, Math.min(body.velocity.y || 0, 2.4)) });
+          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.38);
         } else {
-          // 不给它注入小车高速；只保留很小、被限幅的水平速度，防止“弹射”。
-          const maxLooseVX = 2.4;
-          const nextVX = this.clamp(body.velocity.x * 0.40 + (dx / Math.max(dt, 1 / 120)) / 60 * 0.055, -maxLooseVX, maxLooseVX);
-          this.Body.setVelocity(body, {
-            x: nextVX,
-            y: this.clamp(body.velocity.y * 0.82, -0.32, 4.8)
-          });
-          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * (absDx > 0.5 ? 0.48 : 0.58));
+          // 快速移动：允许轻微惯性，但绝不注入足以弹飞的速度。
+          const carryFactor = overCartDeck ? 0.68 : 0.36;
+          this.Body.translate(body, { x: dx * carryFactor, y: 0 });
+          const nextVX = this.clamp((body.velocity.x || 0) * 0.42 + (dx / Math.max(dt, 1 / 120)) / 60 * 0.035, -1.8, 1.8);
+          this.Body.setVelocity(body, { x: nextVX, y: Math.max(0, Math.min((body.velocity.y || 0) * 0.92, 4.2)) });
+          this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * (absDx > 0.5 ? 0.48 : 0.62));
         }
       }
     }
@@ -719,36 +758,102 @@
           this.Body.setAngularVelocity(body, this.clamp(av * (inLandingGrace ? 0.36 : 0.56), -0.032, 0.032));
         } else {
           // 没有支撑时让重力正常接手，避免悬停；只限制水平漂移和转速。
-          vx = this.clamp(vx * 0.72, -2.2, 2.2);
-          vy = Math.max(vy, 0.35);
-          this.Body.setAngularVelocity(body, this.clamp(av * 0.70, -0.045, 0.045));
+          vx = this.clamp(vx * 0.86, -2.0, 2.0);
+          // 无支撑时让重力自然、连续地接手；只保证不会悬浮，不强行跳变到很大的下落速度。
+          vy = Math.max(vy, 0.28);
+          this.Body.setAngularVelocity(body, this.clamp(av * 0.86, -0.070, 0.070));
         }
         this.Body.setVelocity(body, { x: vx, y: vy });
       }
     }
 
     hasPhysicalSupport(body) {
+      return this.hasDownwardSupport(body);
+    }
+
+    hasDownwardSupport(body) {
+      // 只把“从下方托住”的接触当成支撑。侧面接触不能算支撑，避免方块侧挂后定在半空。
       if (!body) return false;
-      const activeParts = body.parts && body.parts.length > 1 ? body.parts.slice(1) : [body];
-      const targets = [];
-      for (const cartPart of this.cartBodies) if (cartPart) targets.push(cartPart);
+      const p = body.plugin && body.plugin.piece;
+      if (p && p.cartLocked) return true;
+      const b = body.bounds;
+      const supportTol = this.CELL * 0.30;
+      const minOverlap = this.CELL * 0.34;
+      const candidates = [];
+      for (const cartPart of this.cartBodies) if (cartPart) candidates.push(cartPart);
       for (const other of this.pieces.values()) {
         if (!other || other === body) continue;
         const op = other.plugin && other.plugin.piece;
         if (!op || op.missed || op.inAir) continue;
-        if (other.parts && other.parts.length > 1) targets.push(...other.parts.slice(1));
-        else targets.push(other);
+        candidates.push(other);
       }
-      if (!targets.length) return false;
-      for (const part of activeParts) {
-        const hits = this.Query.collides(part, targets);
-        for (const h of hits) {
-          const n = h.collision && h.collision.normal ? h.collision.normal : null;
-          if (!n || Math.abs(n.y) > 0.45 || Math.abs(n.x) > 0.45) return true;
-        }
+      for (const t of candidates) {
+        const tb = t.bounds;
+        const verticalGap = Math.abs(b.max.y - tb.min.y);
+        if (verticalGap > supportTol) continue;
+        const overlapX = Math.min(b.max.x, tb.max.x) - Math.max(b.min.x, tb.min.x);
+        if (overlapX >= minOverlap) return true;
       }
       return false;
     }
+
+    hasIndependentSupport(body, excludeBody) {
+      if (!body) return false;
+      const p = body.plugin && body.plugin.piece;
+      if (p && p.cartLocked) return true;
+      const b = body.bounds;
+      const supportTol = this.CELL * 0.30;
+      const minOverlap = this.CELL * 0.34;
+      const candidates = [];
+      for (const cartPart of this.cartBodies) if (cartPart) candidates.push(cartPart);
+      for (const other of this.pieces.values()) {
+        if (!other || other === body || other === excludeBody) continue;
+        const op = other.plugin && other.plugin.piece;
+        if (!op || op.missed || op.inAir) continue;
+        candidates.push(other);
+      }
+      for (const t of candidates) {
+        const tb = t.bounds;
+        const verticalGap = Math.abs(b.max.y - tb.min.y);
+        if (verticalGap > supportTol) continue;
+        const overlapX = Math.min(b.max.x, tb.max.x) - Math.max(b.min.x, tb.min.x);
+        if (overlapX >= minOverlap) return true;
+      }
+      return false;
+    }
+
+    contactAxis(pair) {
+      const n = pair.collision && pair.collision.normal ? pair.collision.normal : { x: 0, y: 1 };
+      return Math.abs(n.y) >= Math.abs(n.x) ? 'vertical' : 'side';
+    }
+
+    canFreezeContactNow(pair, entA, entB) {
+      if (!entA || !entB) return false;
+      const now = this.currentTime;
+      const young = (ent) => {
+        if (ent.type !== 'piece') return false;
+        const p = ent.body.plugin && ent.body.plugin.piece;
+        return p && p.releasedAt && now - p.releasedAt < 0.36;
+      };
+      if (young(entA) || young(entB)) return false;
+
+      const axis = this.contactAxis(pair);
+      const supportOK = (ent, other) => {
+        if (ent.type === 'cart') return true;
+        const p = ent.body.plugin && ent.body.plugin.piece;
+        if (!p || p.inAir || p.missed) return false;
+        if (p.cartLocked) return true;
+        return this.hasDownwardSupport(ent.body) || this.hasIndependentSupport(ent.body, other && other.body);
+      };
+
+      if (axis === 'side') {
+        // 侧面接触最容易产生“悬挂冻结”。侧向冻结必须两边都已经能自己站住。
+        return supportOK(entA, entB) && supportOK(entB, entA);
+      }
+      // 上下接触至少要有一方是可靠支撑，另一方也必须不是正在滑/滚的年轻刚体。
+      return supportOK(entA, entB) || supportOK(entB, entA);
+    }
+
 
     updateLockedBodies() {
       for (const body of this.pieces.values()) {
@@ -803,8 +908,8 @@
             }
           } else {
             // 没支撑时不要把下落速度抹掉，避免碰撞后的短暂“太空漂浮”。
-            this.Body.setVelocity(body, { x: body.velocity.x * 0.84, y: Math.max(body.velocity.y, 0.28) });
-            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.78);
+            this.Body.setVelocity(body, { x: body.velocity.x * 0.92, y: Math.max(body.velocity.y, 0.25) });
+            this.Body.setAngularVelocity(body, (body.angularVelocity || 0) * 0.90);
           }
         }
 
@@ -897,11 +1002,11 @@
         if (entA.type === 'piece' && (entB.type === 'cart' || entB.type === 'piece')) entA.body.plugin.piece.touchedStack = true;
         if (entB.type === 'piece' && (entA.type === 'cart' || entA.type === 'piece')) entB.body.plugin.piece.touchedStack = true;
 
-        // 急冻方块：必须是平滑且稳定的接触才触发；如果还在滑/滚，就不触发。
-        // 急冻落到小车上也会在稳定平滑接触时立即冻结并粘到小车。
+        // 急冻/熔岩：如果这一刻已经满足“可冻结/可熔化”的稳定判定，就立刻触发；
+        // 如果不满足，就完全不触发，不再保留一段真空等待时间。
         if (flat && stable) {
-          this.tryQuickFreeze(entA, entB);
-          this.tryQuickFreeze(entB, entA);
+          this.trySpecialContactNow(pair, entA, entB);
+          this.trySpecialContactNow(pair, entB, entA);
         }
 
         if (flat && this.canNormalFreeze(entA, entB)) {
@@ -928,7 +1033,7 @@
           }
           this.contactTimers.set(key, rec);
           if (rec.t >= this.FREEZE_TIME) {
-            this.freezeByStableContact(entA, entB);
+            if (this.canFreezeContactNow(pair, entA, entB)) this.freezeByStableContact(entA, entB);
             this.contactTimers.delete(key);
           }
         }
@@ -1007,26 +1112,67 @@
     }
 
     canNormalFreeze(entA, entB) {
-      // 小车被视为开局已冻结的结构：任意小车部位与普通/急冻冰块平滑稳定接触 14 秒后，冰块冻结并粘到小车。
-      if (entA.type === 'cart' && entB.type === 'piece') return entB.body.plugin.piece.kind !== 'dirt';
-      if (entB.type === 'cart' && entA.type === 'piece') return entA.body.plugin.piece.kind !== 'dirt';
-      if (entA.type === 'piece' && entB.type === 'piece') {
-        const pa = entA.body.plugin.piece;
-        const pb = entB.body.plugin.piece;
-        return pa.kind !== 'dirt' && pb.kind !== 'dirt';
-      }
+      // 小车被视为开局已冻结的结构：任意小车部位与可冻结冰块平滑稳定接触 16 秒后，冰块冻结并粘到小车。
+      const canPiece = (body) => {
+        const p = body && body.plugin && body.plugin.piece;
+        return p && p.kind !== 'dirt' && p.kind !== 'lava' && !p.noFreeze;
+      };
+      if (entA.type === 'cart' && entB.type === 'piece') return canPiece(entB.body);
+      if (entB.type === 'cart' && entA.type === 'piece') return canPiece(entA.body);
+      if (entA.type === 'piece' && entB.type === 'piece') return canPiece(entA.body) && canPiece(entB.body);
       return false;
+    }
+
+    trySpecialContactNow(pair, sourceEnt, targetEnt) {
+      if (!sourceEnt || sourceEnt.type !== 'piece') return;
+      const source = sourceEnt.body;
+      const sp = source.plugin && source.plugin.piece;
+      if (!sp || (sp.kind !== 'quickFreeze' && sp.kind !== 'lava')) return;
+      if (sp.inAir || sp.missed) return;
+      if (!this.canFreezeContactNow(pair, sourceEnt, targetEnt)) return;
+      if (sp.kind === 'quickFreeze') this.tryQuickFreeze(sourceEnt, targetEnt);
+      else this.tryLavaMelt(sourceEnt, targetEnt);
+    }
+
+    queueSpecialContact(pair, sourceEnt, targetEnt) {
+      if (!sourceEnt || sourceEnt.type !== 'piece') return;
+      const source = sourceEnt.body;
+      const sp = source.plugin && source.plugin.piece;
+      if (!sp || (sp.kind !== 'quickFreeze' && sp.kind !== 'lava')) return;
+      if (sp.inAir || sp.missed) return;
+      if (!this.canFreezeContactNow(pair, sourceEnt, targetEnt)) return;
+
+      const key = `${sp.kind}:${sourceEnt.key}->${targetEnt.key}`;
+      const rec = this.specialContactTimers.get(key) || { t: 0, pair, sourceEnt, targetEnt };
+      rec.t += this.latestDT;
+      rec.pair = pair;
+      rec.sourceEnt = sourceEnt;
+      rec.targetEnt = targetEnt;
+      rec.last = this.currentTime;
+      this.specialContactTimers.set(key, rec);
+
+      const need = 0;
+      if (rec.t >= need) {
+        if (sp.kind === 'quickFreeze') this.tryQuickFreeze(sourceEnt, targetEnt);
+        else this.tryLavaMelt(sourceEnt, targetEnt);
+        this.specialContactTimers.delete(key);
+      }
+    }
+
+    cleanupSpecialContactTimers() {
+      for (const [key, rec] of Array.from(this.specialContactTimers.entries())) {
+        if (this.currentTime - (rec.last || 0) > 0.12) this.specialContactTimers.delete(key);
+      }
     }
 
     tryQuickFreeze(sourceEnt, targetEnt) {
       if (!sourceEnt || sourceEnt.type !== 'piece') return;
       const source = sourceEnt.body;
       const sp = source.plugin && source.plugin.piece;
-      if (!sp || sp.kind !== 'quickFreeze') return;
+      if (!sp || sp.kind !== 'quickFreeze' || sp.noFreeze) return;
 
       if (targetEnt.type === 'cart') {
         // 急冻方块稳定落到小车任意部位时，立刻与“开局已冻结”的小车结构冻结粘连。
-        if (sp.kind === 'dirt') return;
         this.setFrozen(source);
         this.createCartBond(source);
         this.effects.push({ type: 'quickFreeze', x: source.position.x, y: source.position.y, t: 0, life: 0.55 });
@@ -1036,16 +1182,27 @@
       if (targetEnt.type !== 'piece') return;
       const target = targetEnt.body;
       const tp = target.plugin && target.plugin.piece;
-      if (!tp || tp.kind === 'dirt') {
-        // 土方块永远不冻结；急冻方块也不会和土块建立固定冻结关系。
-        return;
-      }
+      if (!tp || tp.kind === 'dirt' || tp.kind === 'lava' || tp.noFreeze) return;
       if (this.bondKeys.has(this.pieceBondKey(source, target))) return;
       this.setFrozen(source);
       this.setFrozen(target);
       this.createPieceBond(source, target, true);
       this.effects.push({ type: 'quickFreeze', x: target.position.x, y: target.position.y, t: 0, life: 0.55 });
     }
+
+    tryLavaMelt(sourceEnt, targetEnt) {
+      if (!sourceEnt || sourceEnt.type !== 'piece') return;
+      const source = sourceEnt.body;
+      const sp = source.plugin && source.plugin.piece;
+      if (!sp || sp.kind !== 'lava') return;
+      if (targetEnt.type !== 'piece') return;
+      const target = targetEnt.body;
+      const tp = target.plugin && target.plugin.piece;
+      if (!tp || tp.kind === 'lava' || tp.missed) return;
+      this.markNoFreezeAndMelt(target);
+      this.effects.push({ type: 'lava', x: target.position.x, y: target.position.y, t: 0, life: 0.55 });
+    }
+
 
     freezeByStableContact(entA, entB) {
       if (entA.type === 'cart' && entB.type === 'piece') {
@@ -1063,11 +1220,79 @@
 
     setFrozen(body) {
       const p = body.plugin.piece;
-      if (!p || p.kind === 'dirt') return;
+      if (!p || p.kind === 'dirt' || p.kind === 'lava' || p.noFreeze) return;
       if (!p.frozen) {
         p.frozen = true;
         p.frostedAt = this.currentTime;
         this.effects.push({ type: 'freeze', x: body.position.x, y: body.position.y, t: 0, life: 0.55 });
+      }
+    }
+
+    markNoFreezeAndMelt(body) {
+      const p = body && body.plugin && body.plugin.piece;
+      if (!p || p.kind === 'lava') return;
+      p.noFreeze = true;
+      p.frozen = false;
+      p.cartLocked = false;
+      p.lockRel = null;
+      if (body.isStatic) this.Body.setStatic(body, false);
+      this.removeBondsForPiece(body);
+      this.Body.setVelocity(body, { x: this.clamp(body.velocity.x || 0, -1.8, 1.8), y: Math.max(body.velocity.y || 0, 1.0) });
+      this.Body.setAngularVelocity(body, this.clamp(body.angularVelocity || 0, -0.035, 0.035));
+      if (this.Sleeping) this.Sleeping.set(body, false);
+    }
+
+    removeBondsForPiece(piece) {
+      const pid = piece.id;
+      const keep = [];
+      for (const bond of this.bonds) {
+        const hit = bond.a === pid || bond.b === pid;
+        if (hit) {
+          if (bond.constraints) bond.constraints.forEach((c) => this.World.remove(this.world, c));
+          const key = bond.type === 'cart' ? ['cart', 'p' + pid].join('|') : ['p' + bond.a, 'p' + bond.b].sort().join('|');
+          this.bondKeys.delete(key);
+          this.removeGraphEdge(bond.a, bond.b);
+        } else keep.push(bond);
+      }
+      this.bonds = keep;
+      this.recomputeCartLocks();
+    }
+
+    removeGraphEdge(a, b) {
+      if (this.bondGraph.has(a)) this.bondGraph.get(a).delete(b);
+      if (this.bondGraph.has(b)) this.bondGraph.get(b).delete(a);
+    }
+
+    recomputeCartLocks() {
+      const connected = new Set(['cart']);
+      const queue = ['cart'];
+      while (queue.length) {
+        const id = queue.shift();
+        const nb = this.bondGraph.get(id);
+        if (!nb) continue;
+        for (const n of nb) {
+          if (!connected.has(n)) {
+            connected.add(n);
+            queue.push(n);
+          }
+        }
+      }
+      for (const body of this.pieces.values()) {
+        const p = body.plugin && body.plugin.piece;
+        if (!p || p.missed) continue;
+        if (connected.has(body.id) && p.frozen && !p.noFreeze && p.kind !== 'lava' && p.kind !== 'dirt') {
+          p.cartLocked = true;
+          p.lockRel = { x: body.position.x - this.cartX, y: body.position.y - this.cartY, angle: body.angle };
+          this.Body.setStatic(body, true);
+          this.Body.setVelocity(body, { x: 0, y: 0 });
+          this.Body.setAngularVelocity(body, 0);
+        } else if (p.cartLocked) {
+          p.cartLocked = false;
+          p.lockRel = null;
+          this.Body.setStatic(body, false);
+          this.Body.setVelocity(body, { x: this.clamp(body.velocity.x || 0, -1.2, 1.2), y: Math.max(body.velocity.y || 0, 0.8) });
+          this.Body.setAngularVelocity(body, 0);
+        }
       }
     }
 
@@ -1079,7 +1304,7 @@
       if (!a || !b || a === b) return;
       const pa = a.plugin.piece;
       const pb = b.plugin.piece;
-      if (!pa || !pb || pa.kind === 'dirt' || pb.kind === 'dirt') return;
+      if (!pa || !pb || pa.kind === 'dirt' || pb.kind === 'dirt' || pa.kind === 'lava' || pb.kind === 'lava' || pa.noFreeze || pb.noFreeze) return;
       const key = this.pieceBondKey(a, b);
       if (this.bondKeys.has(key)) return;
       this.bondKeys.add(key);
@@ -1114,7 +1339,7 @@
 
     createCartBond(piece) {
       const p = piece.plugin.piece;
-      if (!p || p.kind === 'dirt') return;
+      if (!p || p.kind === 'dirt' || p.kind === 'lava' || p.noFreeze) return;
       const key = ['cart', 'p' + piece.id].join('|');
       if (this.bondKeys.has(key)) return;
       this.bondKeys.add(key);
@@ -1165,6 +1390,13 @@
       }
     }
 
+    startGame() {
+      this.gameStarted = true;
+      this.gameOver = false;
+      this.nextSpawnAt = 0;
+      this.scheduleSpawn(120);
+    }
+
     restart() {
       for (const body of this.pieces.values()) this.World.remove(this.world, body);
       for (const b of this.bonds) {
@@ -1172,6 +1404,7 @@
       }
       this.pieces.clear();
       this.contactTimers.clear();
+      if (this.specialContactTimers) this.specialContactTimers.clear();
       this.activeFlatKeys.clear();
       this.activeStableKeys.clear();
       this.bonds = [];
@@ -1182,6 +1415,7 @@
       this.loadedCells = 0;
       this.missedPieces = 0;
       this.gameOver = false;
+      this.gameStarted = true;
       this.spawnCount = 0;
       this.firstFiveQuickFreezeSlots = this.makeOpeningQuickFreezeSlots();
       this.cameraScale = 0.74;
@@ -1201,7 +1435,8 @@
       this.drawBackground(ctx);
       this.drawWorld(ctx);
       this.drawEffects(ctx);
-      this.drawUI(ctx);
+      if (this.gameStarted) this.drawUI(ctx);
+      if (!this.gameStarted) this.drawStartScreen(ctx);
       if (this.gameOver) this.drawGameOver(ctx);
     }
 
@@ -1356,6 +1591,8 @@
       this.drawFishGuard(ctx, this.cartX - this.cartW / 2 - 33, this.cartY - 28, -1);
       this.drawFishGuard(ctx, this.cartX + this.cartW / 2 + 33, this.cartY - 28, 1);
 
+      if (this.guideLineEnabled) this.drawGuideLine(ctx);
+
       for (const body of this.pieces.values()) {
         const p = body.plugin.piece;
         if (!p || p.missed) continue;
@@ -1418,6 +1655,9 @@
       if (p.kind === 'quickFreeze') {
         fill = '#7ef4f3';
         shadow = 'rgba(0, 220, 230, 0.40)';
+      } else if (p.kind === 'lava') {
+        fill = '#ff714a';
+        shadow = 'rgba(255, 82, 36, 0.52)';
       } else if (p.kind === 'dirt') {
         fill = '#d7a63b';
         shadow = 'rgba(80, 48, 12, 0.22)';
@@ -1427,7 +1667,7 @@
       }
 
       ctx.shadowColor = shadow;
-      ctx.shadowBlur = p.frozen || p.kind === 'quickFreeze' ? 10 : 2;
+      ctx.shadowBlur = p.frozen || p.kind === 'quickFreeze' || p.kind === 'lava' ? 10 : 2;
       ctx.fillStyle = fill;
       ctx.strokeStyle = 'rgba(255,255,255,0.18)';
       ctx.lineWidth = p.frozen ? 1.3 : 0.7;
@@ -1435,7 +1675,7 @@
       ctx.shadowBlur = 0;
 
       // 非冻结方块的白框被刻意淡化；冻结后由整体外框统一加粗。
-      if (p.kind !== 'dirt') {
+      if (p.kind !== 'dirt' && p.kind !== 'lava') {
         ctx.globalAlpha = p.frozen ? 0.54 : 0.20;
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
@@ -1449,7 +1689,7 @@
 
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = p.kind === 'dirt' ? '#8b6225' : (p.frozen ? '#efffff' : 'rgba(255,255,255,0.48)');
+      ctx.strokeStyle = p.kind === 'dirt' ? '#8b6225' : (p.kind === 'lava' ? '#ffd08a' : (p.frozen ? '#efffff' : 'rgba(255,255,255,0.48)'));
       ctx.lineWidth = p.frozen ? 2.4 : 1.15;
       for (const line of data.cracks) {
         ctx.beginPath();
@@ -1460,6 +1700,9 @@
 
       if (p.kind === 'quickFreeze') {
         this.drawSnowBurst(ctx, 0, 0, size * 0.36);
+      }
+      if (p.kind === 'lava') {
+        this.drawLavaCore(ctx, 0, 0, size * 0.38);
       }
       if (p.frozen && p.kind !== 'dirt') {
         ctx.globalAlpha = 0.36;
@@ -1487,6 +1730,11 @@
       if (p.kind === 'dirt') {
         ctx.strokeStyle = '#f5df8e';
         ctx.lineWidth = 2.8;
+      } else if (p.kind === 'lava') {
+        ctx.strokeStyle = '#ffe0a0';
+        ctx.lineWidth = 4.2;
+        ctx.shadowColor = 'rgba(255, 95, 35, 0.72)';
+        ctx.shadowBlur = 8;
       } else if (p.frozen || p.kind === 'quickFreeze') {
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 5.2;
@@ -1532,6 +1780,29 @@
           ctx.stroke();
         }
       }
+      ctx.restore();
+    }
+
+    drawLavaCore(ctx, x, y, r) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.fillStyle = '#ffd27a';
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 0.95);
+      ctx.bezierCurveTo(r * 0.70, -r * 0.18, r * 0.50, r * 0.74, 0, r);
+      ctx.bezierCurveTo(-r * 0.58, r * 0.50, -r * 0.66, -r * 0.16, 0, -r * 0.95);
+      ctx.fill();
+      ctx.strokeStyle = '#fff0b8';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.48, r * 0.05);
+      ctx.lineTo(r * 0.42, -r * 0.22);
+      ctx.moveTo(-r * 0.18, r * 0.52);
+      ctx.lineTo(r * 0.32, r * 0.18);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -1701,14 +1972,37 @@
       ctx.restore();
     }
 
+    drawGuideLine(ctx) {
+      const body = this.activePiece;
+      if (!body || this.gameOver || !this.gameStarted) return;
+      const p = body.plugin && body.plugin.piece;
+      if (!p || !p.inAir || p.missed) return;
+      const pos = this.worldToScreen(body.position.x, body.position.y);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.56)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 7]);
+      ctx.beginPath();
+      ctx.moveTo(pos.x, Math.max(0, pos.y - 120 * this.cameraScale));
+      ctx.lineTo(pos.x, this.H - 120);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = '#eaffff';
+      ctx.beginPath();
+      ctx.arc(pos.x, this.H - 120, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     drawEffects(ctx) {
       for (const e of this.effects) {
         const t = e.t / e.life;
         const pos = this.worldToScreen(e.x, e.y);
         ctx.save();
         ctx.globalAlpha = Math.max(0, 1 - t);
-        if (e.type === 'freeze' || e.type === 'quickFreeze' || e.type === 'cartFreeze') {
-          ctx.strokeStyle = e.type === 'quickFreeze' ? '#eaffff' : '#dfffff';
+        if (e.type === 'freeze' || e.type === 'quickFreeze' || e.type === 'cartFreeze' || e.type === 'lava') {
+          ctx.strokeStyle = e.type === 'lava' ? '#ffcf77' : (e.type === 'quickFreeze' ? '#eaffff' : '#dfffff');
           ctx.lineWidth = 3;
           ctx.beginPath();
           ctx.arc(pos.x, pos.y, (18 + 46 * t) * this.cameraScale, 0, Math.PI * 2);
@@ -1777,6 +2071,14 @@
       ctx.restore();
     }
 
+    getStartButton() {
+      return { x: this.W / 2 - 92, y: this.H / 2 + 44, w: 184, h: 58 };
+    }
+
+    getGuideToggleRect() {
+      return { x: this.W / 2 - 116, y: this.H / 2 - 26, w: 232, h: 44 };
+    }
+
     getButtons() {
       const bottomSafe = 18;
       const y = this.H - 75 - bottomSafe;
@@ -1826,6 +2128,51 @@
       ctx.textBaseline = 'middle';
       ctx.font = `bold ${Math.min(24, r.h * 0.34)}px KaiTi, STKaiti, Songti SC, serif`;
       ctx.fillText(`装载${this.loadedCells}块冰块`, r.x + r.w / 2, r.y + r.h / 2 + 1);
+      ctx.restore();
+    }
+
+    drawStartScreen(ctx) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(20, 50, 60, 0.36)';
+      ctx.fillRect(0, 0, this.W, this.H);
+
+      const panelW = Math.min(320, this.W - 42);
+      const panelH = 300;
+      const x = (this.W - panelW) / 2;
+      const y = this.H / 2 - panelH / 2;
+      ctx.fillStyle = '#f4e6c7';
+      ctx.strokeStyle = '#332822';
+      ctx.lineWidth = 5;
+      this.roundRect(ctx, x, y, panelW, panelH, 16, true, true);
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 2;
+      this.roundRect(ctx, x + 10, y + 10, panelW - 20, panelH - 20, 11, false, true);
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#3e2b23';
+      ctx.font = 'bold 34px KaiTi, STKaiti, Songti SC, serif';
+      ctx.fillText('叠冰塔', this.W / 2, y + 58);
+      ctx.font = 'bold 18px Georgia, serif';
+      ctx.fillText('Ice Cart', this.W / 2, y + 86);
+
+      ctx.font = '15px KaiTi, STKaiti, Songti SC, serif';
+      ctx.fillStyle = '#65472d';
+      ctx.fillText('拖动小车接住冰块，稳定接触后冻结。', this.W / 2, y + 122);
+
+      const toggle = this.getGuideToggleRect();
+      ctx.fillStyle = this.guideLineEnabled ? '#dff5f2' : '#ead8b0';
+      ctx.strokeStyle = '#60442c';
+      ctx.lineWidth = 3;
+      this.roundRect(ctx, toggle.x, toggle.y, toggle.w, toggle.h, 10, true, true);
+      ctx.fillStyle = '#3e2b23';
+      ctx.font = 'bold 20px KaiTi, STKaiti, Songti SC, serif';
+      ctx.fillText(`辅助线：${this.guideLineEnabled ? '开' : '关'}`, this.W / 2, toggle.y + toggle.h / 2 + 7);
+
+      this.drawButton(ctx, this.getStartButton(), '开始游戏', false);
+
+      ctx.fillStyle = 'rgba(60, 43, 35, 0.70)';
+      ctx.font = '13px KaiTi, STKaiti, Songti SC, serif';
+      ctx.fillText('之后也可以在开始界面切换辅助线', this.W / 2, y + panelH - 22);
       ctx.restore();
     }
 
